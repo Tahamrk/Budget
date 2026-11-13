@@ -1,7 +1,7 @@
 /* Taha Muhasebe — tüm veriler telefonda (localStorage) */
 (() => {
   'use strict';
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.1';
   const KEY = 'tm.data.v1';
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
@@ -95,6 +95,8 @@
   const catById = id => db.cats.find(c => c.id === id) || db.cats.find(c => c.id === 'other') || { id: 'other', name: 'Diğer', emoji: '📦' };
   const methodById = id => METHODS.find(m => m.id === id) || { id, name: 'Silinmiş hesap', s: '?', cls: 'm-owed', cur: 'CNY' };
   const accCur = id => (ACCS.find(a => a.id === id) || { cur: 'CNY' }).cur;
+  // silinmiş bir hesaba ya da türe ("alipay") işaret ediyorsa var olan bir hesaba çevir
+  const resolveAcc = x => (ACC_IDS.includes(x) ? x : ((ACCS.find(a => a.type === x) || ACCS[0] || {}).id));
   const conv = (amt, from, to) => (from === to ? amt : fromCny(toCny(amt, from), to));
   const mdot = id => { const m = methodById(id); return `<span class="mdot ${m.cls}" aria-hidden="true">${m.s}</span>`; };
 
@@ -357,18 +359,27 @@
   });
 
   // hesap ekle / düzenle / sil
-  const accountUsed = id => db.tx.some(t => t.method === id) || db.moves.some(m => m.acc === id || m.to === id)
-    || db.debts.some(d => d.acc === id || (d.paid || []).some(p => p.acc === id))
-    || db.tx.some(t => ((t.split && t.split.got) || []).some(g => g.acc === id));
+  // hesabı kullanan GERÇEK kayıtlar (girilen bakiye kaydı sayılmaz; hesapla birlikte silinir)
+  function accountUsage(id) {
+    const n = {
+      harcama: db.tx.filter(t => t.method === id).length,
+      'gelen ödeme': db.tx.reduce((s, t) => s + ((t.split && t.split.got) || []).filter(g => g.acc === id).length, 0),
+      'para ekleme/aktarma': db.moves.filter(m => m.type !== 'set' && (m.acc === id || m.to === id)).length,
+      borç: db.debts.filter(d => d.acc === id || (d.paid || []).some(p => p.acc === id)).length,
+    };
+    const parts = Object.entries(n).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`);
+    return { used: parts.length > 0, text: parts.join(', ') };
+  }
   function openAccountForm(a) {
-    const isNew = !a, used = a ? accountUsed(a.id) : false;
-    const isDefault = a && DEFAULT_ACCOUNTS.some(d => d.id === a.id);
+    const isNew = !a, usage = a ? accountUsage(a.id) : { used: false }, used = usage.used;
     openModal({
       title: isNew ? 'Yeni hesap' : 'Hesabı düzenle',
       body: `<label class="f">Türü${segHtml('type', typeOpts, a ? a.type : 'cash')}</label>
-        <label class="f">Para birimi${used ? `<div class="muted small">${CURS[a.cur]} ${a.cur} (kayıtlı hareketler olduğu için değiştirilemez)</div>` : segHtml('cur', curOpts, a ? a.cur : 'TRY')}</label>
+        <label class="f">Para birimi${used ? `<div class="muted small">${CURS[a.cur]} ${a.cur} (bu hesapla ${esc(usage.text)} olduğu için değiştirilemez)</div>` : segHtml('cur', curOpts, a ? a.cur : 'TRY')}</label>
         <label class="f">Adı<input id="m-name" type="text" value="${a ? esc(a.name) : ''}" placeholder="örn. Nakit ₺"></label>
-        ${a && !isDefault ? `<button class="link-btn danger" id="m-del-acc" type="button">Hesabı sil</button>` : ''}`,
+        ${a ? (used
+          ? `<div class="muted small">Silinemez: bu hesapla ${esc(usage.text)} kayıtlı. Önce o kayıtları silmen ya da başka hesaba taşıman gerekir.</div>`
+          : `<button class="link-btn danger" id="m-del-acc" type="button">Hesabı sil</button>`) : ''}`,
       buttons: [{ label: 'Vazgeç' }, { label: isNew ? 'Ekle' : 'Kaydet', primary: true, onClick: () => {
         const type = segVal('type'), cur = used ? a.cur : segVal('cur');
         const name = $('#m-name').value.trim() || `${TYPES[type].name} ${CURS[cur]}`;
@@ -384,11 +395,17 @@
     modalOnSeg = suggest; suggest();
     const del = $('#m-del-acc');
     if (del) del.onclick = () => {
-      if (used) { toast('Bu hesapla kayıtlar var; silinemez (adını değiştirebilirsin)'); return; }
-      if (!confirm(`${a.name} silinsin mi?`)) return;
+      if (db.accounts.length <= 1) { toast('En az bir hesap kalmalı'); return; }
+      if (!confirm(`${a.name} silinsin mi? (Girdiğin bakiye de silinir.)`)) return;
+      const removedAcc = { ...db.accounts.find(x => x.id === a.id) }, idx = db.accounts.findIndex(x => x.id === a.id);
+      const removedMoves = db.moves.filter(m => m.acc === a.id);
       db.accounts = db.accounts.filter(x => x.id !== a.id);
       db.moves = db.moves.filter(m => m.acc !== a.id);
-      syncAccounts(); save(); closeModal(); toast('Hesap silindi');
+      syncAccounts(); save(); closeModal();
+      toast(`${a.name} silindi`, 'Geri al', () => {
+        db.accounts.splice(idx, 0, removedAcc); db.moves.push(...removedMoves);
+        syncAccounts(); save(); render();
+      }, 5000);
     };
   }
 
@@ -505,7 +522,7 @@
       if (!q) { closeModal(); toast(dir === 'owed' ? `${who || 'İsimsiz'}: hepsi ödendi ✓` : `${who} borcu kapandı ✓`); return; }
       $('#modal-title').textContent = `${who || 'İsimsiz'} · ${personAmt(q)}`;
       $('#modal-body').innerHTML = `<div class="muted small">${dir === 'owed' ? 'Sana olan borcu. Para geldiyse “Ödedi”ye dokun.' : 'Senin ona borcun. Ödediysen “Ödedim”e dokun.'}</div>
-        <label class="f">${dir === 'owed' ? 'Para hangi hesabına geldi?' : 'Hangi hesabından ödedin?'}${segHtml('acc', accOpts(true), db.settings.recvAcc || 'wechat')}</label>
+        <label class="f">${dir === 'owed' ? 'Para hangi hesabına geldi?' : 'Hangi hesabından ödedin?'}${segHtml('acc', accOpts(true), resolveAcc(db.settings.recvAcc || 'wechat'))}</label>
         ${q.items.map((it, i) => `<div class="item-row"><span class="ir-main"><div class="ir-title">${esc(it.title)}</div>
           <div class="ir-sub">${dayShort.format(it.ts)}${it.kind === 'split' ? ` · bölüşme (${splitInfo(it.t).n} kişi)` : ''}</div></span>
           <b>${fmt(it.amt, it.cur)}</b>
@@ -635,7 +652,7 @@
       id: t.id || null,
       amountStr: t.amt ? String(+(+t.amt).toFixed(2)).replace('.', ',') : '',
       cur: t.cur || db.settings.lastCur || 'CNY',
-      method: t.method || db.settings.lastMethod || 'alipay',
+      method: t.method || (db.settings.lastMethod === 'owed' ? 'owed' : resolveAcc(db.settings.lastMethod || 'alipay')),
       cat: t.cat || null,
       note: t.note || '',
       ts: t.ts || null,
@@ -721,7 +738,7 @@
     const mineVal = active ? document.activeElement.value : (S.split.mine != null ? minePh : '');
     const slots = splitSlots({ amt: amountVal(), cny: 0, split: S.split });
     const names = S.split.people || [];
-    const recv = db.settings.recvAcc || 'wechat';
+    const recv = resolveAcc(db.settings.recvAcc || 'wechat');
     p.innerHTML = `
       <div class="sp-row"><span>Kaç kişi? <small>(sen dahil)</small></span>
         <div class="stepper"><button data-sa="minus" aria-label="Azalt">−</button><b>${s.n}</b><button data-sa="plus" aria-label="Artır">＋</button></div></div>
@@ -754,7 +771,7 @@
     const b = e.target.closest('[data-sa]'); if (!b || !S || !S.split) return;
     const sp = S.split, s = splitInfo({ amt: amountVal(), split: sp });
     sp.got = sp.got || [];
-    const recv = db.settings.recvAcc || 'wechat';
+    const recv = resolveAcc(db.settings.recvAcc || 'wechat');
     const addGot = (a, who) => {
       if (!(a > 0)) return;
       const g = { a: Math.round(a * 100) / 100, ts: Date.now(), acc: recv };
@@ -979,7 +996,7 @@
       if (b.dataset.id === '__expense') return nextScan({ ...item, r: { ...r, incoming: false } });
       if (b.dataset.debt) {
         const d = db.debts.find(x => x.id === b.dataset.debt); if (!d) return nextScan();
-        const p = { amt: Math.min(c2(conv(amt, 'CNY', debtCur(d))), debtRemaining(d)), ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
+        const p = { amt: Math.min(c2(conv(amt, 'CNY', debtCur(d))), debtRemaining(d)), ts: r.ts || Date.now(), acc: resolveAcc(r.method || db.settings.recvAcc || 'wechat') };
         d.paid = d.paid || []; d.paid.push(p); save(); render();
         toast(`${fmt(p.amt, debtCur(d))} ← ${d.who}` + (debtRemaining(d) > 0.005 ? ` · kalan ${fmt(debtRemaining(d), debtCur(d))}` : ' · ✓ kapandı'), 'Geri al', () => {
           const i = d.paid.indexOf(p); if (i >= 0) d.paid.splice(i, 1); save(); render();
@@ -987,7 +1004,7 @@
         return setTimeout(nextScan, 300);
       }
       const t = db.tx.find(x => x.id === b.dataset.id); if (!t) return nextScan();
-      const g = { a: Math.round(amt * rate(t.cur) * 100) / 100, ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
+      const g = { a: Math.round(amt * rate(t.cur) * 100) / 100, ts: r.ts || Date.now(), acc: resolveAcc(r.method || db.settings.recvAcc || 'wechat') };
       if (r.from) g.from = r.from;
       // hangi kişi? önce isimden eşleştir, yoksa ödemeyen ilk kişi
       const slots = splitSlots(t), names = t.split.people || [];
@@ -1024,7 +1041,7 @@
       mode: 'scan',
       tx: {
         amt: r.amount || 0, cur: 'CNY',
-        method: r.method || db.settings.lastMethod,
+        method: resolveAcc(r.method || db.settings.lastMethod || 'alipay'),
         cat: (mem && mem.c) || r.cat || null,
         note: (mem && mem.d) || r.desc || '',
         ts: r.ts || null,
