@@ -1,6 +1,6 @@
 /* Çevrimdışı çalışma: uygulama dosyaları önbellekte tutulur.
  * Uygulamayı güncellediğinde CACHE sürümünü artır. */
-const CACHE = 'tm-v1.5.0';
+const CACHE = 'tm-v1.6.0';
 const SHELL = [
   './', 'index.html', 'app.css', 'app.js', 'ocr.js', 'dictionary.js', 'pinyin.js', 'translate.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
@@ -23,7 +23,8 @@ self.addEventListener('message', e => {
 });
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' → tarayıcının HTTP önbelleğindeki eski kopyayı değil, sunucudaki yeni dosyayı al
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

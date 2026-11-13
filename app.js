@@ -1,7 +1,7 @@
 /* Taha Muhasebe — tüm veriler telefonda (localStorage) */
 (() => {
   'use strict';
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const KEY = 'tm.data.v1';
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
@@ -21,20 +21,32 @@
     { id: 'personal', name: 'Bakım', emoji: '💇' },
     { id: 'other', name: 'Diğer', emoji: '📦' },
   ];
-  const METHODS = [
-    { id: 'alipay', name: 'Alipay', s: 'A', cls: 'm-alipay' },
-    { id: 'wechat', name: 'WeChat', s: 'W', cls: 'm-wechat' },
-    { id: 'card', name: 'Kart', s: 'K', cls: 'm-card' },
-    { id: 'cash', name: 'Nakit', s: 'N', cls: 'm-cash' },
-    { id: 'owed', name: 'Borçla', s: 'B', cls: 'm-owed' }, // başkası benim yerime ödedi
-  ];
-  const ACC_IDS = ['alipay', 'wechat', 'card', 'cash']; // gerçek hesaplar (bakiye tutulur)
-  const ACCS = METHODS.filter(m => ACC_IDS.includes(m.id));
   const CURS = { CNY: '¥', TRY: '₺', USD: '$' };
   const CUR_ORDER = ['CNY', 'TRY', 'USD'];
+  // hesap türleri (görünüm); hesapların kendisi db.accounts'ta, her birinin kendi para birimi var
+  const TYPES = {
+    alipay: { name: 'Alipay', s: 'A', cls: 'm-alipay' },
+    wechat: { name: 'WeChat', s: 'W', cls: 'm-wechat' },
+    card: { name: 'Kart', s: 'K', cls: 'm-card' },
+    cash: { name: 'Nakit', s: 'N', cls: 'm-cash' },
+  };
+  const DEFAULT_ACCOUNTS = [
+    { id: 'alipay', name: 'Alipay', type: 'alipay', cur: 'CNY' },
+    { id: 'wechat', name: 'WeChat', type: 'wechat', cur: 'CNY' },
+    { id: 'card', name: 'Kart', type: 'card', cur: 'CNY' },
+    { id: 'cash', name: 'Nakit', type: 'cash', cur: 'CNY' },
+  ];
+  const OWED = { id: 'owed', name: 'Borçla', s: 'B', cls: 'm-owed', type: 'owed', cur: 'CNY' }; // başkası benim yerime ödedi
+  let ACCS = [], ACC_IDS = [], METHODS = [];
+  function syncAccounts() {
+    ACCS = db.accounts.map(a => ({ ...a, s: a.cur !== 'CNY' ? CURS[a.cur] : TYPES[a.type].s, cls: TYPES[a.type].cls }));
+    ACC_IDS = ACCS.map(a => a.id);
+    METHODS = [...ACCS, OWED];
+  }
 
   /* ---------------- veri ---------------- */
   let db = load();
+  syncAccounts();
   function load() {
     let d = null;
     try { d = JSON.parse(localStorage.getItem(KEY)); } catch (e) { /* boş */ }
@@ -51,6 +63,7 @@
       // borçlar: dir 'in' = bana borçlu, 'out' = ben borçluyum
       debts: Array.isArray(d.debts) ? d.debts : [],
       people: Array.isArray(d.people) ? d.people : [],
+      accounts: Array.isArray(d.accounts) && d.accounts.length ? d.accounts : DEFAULT_ACCOUNTS.map(a => ({ ...a })),
       settings: Object.assign({
         displayCur: 'CNY', lastMethod: 'alipay', lastCur: 'CNY', nameLang: 'en', recvAcc: 'wechat',
         rates: { CNY: 1, TRY: 6.0, USD: 0.14 }, ratesAt: 0, lastBackup: 0, createdAt: Date.now(),
@@ -80,7 +93,9 @@
   const mnameOther = zh => !zh ? '' : db.settings.nameLang === 'zh' ? nameEn(zh) : zh;
 
   const catById = id => db.cats.find(c => c.id === id) || db.cats.find(c => c.id === 'other') || { id: 'other', name: 'Diğer', emoji: '📦' };
-  const methodById = id => METHODS.find(m => m.id === id) || METHODS[0];
+  const methodById = id => METHODS.find(m => m.id === id) || { id, name: 'Silinmiş hesap', s: '?', cls: 'm-owed', cur: 'CNY' };
+  const accCur = id => (ACCS.find(a => a.id === id) || { cur: 'CNY' }).cur;
+  const conv = (amt, from, to) => (from === to ? amt : fromCny(toCny(amt, from), to));
   const mdot = id => { const m = methodById(id); return `<span class="mdot ${m.cls}" aria-hidden="true">${m.s}</span>`; };
 
   const monthFmt = new Intl.DateTimeFormat('tr-TR', { month: 'long', year: 'numeric' });
@@ -144,41 +159,53 @@
     return slots;
   }
 
-  /* Hesap bakiyeleri: son "gerçek bakiye" kaydı + ondan sonraki tüm hareketler */
+  /* Hesap bakiyeleri: son "gerçek bakiye" kaydı + ondan sonraki tüm hareketler.
+   * Her hareketin tutarı (amt) o hesabın KENDİ para biriminde. Eski kayıtlarda sadece cny vardır (¥ hesaplar). */
+  const mvAmt = m => (m.amt != null ? m.amt : m.cny);
+  const debtCur = d => d.cur || 'CNY';
+  const debtAmt = d => (d.amt != null ? d.amt : d.cny);
+  const paidAmt = p => (p.amt != null ? p.amt : p.cny);
   function flows() {
     const f = [];
+    const push = (acc, ts, amt, cur, label) => { if (acc) f.push({ acc, ts, amt: conv(amt, cur, accCur(acc)), label }); };
     db.tx.forEach(t => {
-      if (ACC_IDS.includes(t.method)) f.push({ acc: t.method, ts: t.ts, cny: -(+t.cny || 0), label: mname(t.orig) || t.note || catById(t.cat).name });
-      ((t.split && t.split.got) || []).forEach(g => { if (g.acc) f.push({ acc: g.acc, ts: g.ts, cny: ratio(t, g.a), label: '👥 ' + (g.from || 'Pay geldi') }); });
+      if (ACC_IDS.includes(t.method)) {
+        const cur = accCur(t.method);
+        f.push({ acc: t.method, ts: t.ts, amt: -(t.cur === cur ? +t.amt : fromCny(+t.cny || 0, cur)), label: mname(t.orig) || t.note || catById(t.cat).name });
+      }
+      ((t.split && t.split.got) || []).forEach(g => push(g.acc, g.ts, +g.a || 0, t.cur, '👥 ' + (g.from || 'Pay geldi')));
     });
     db.moves.forEach(m => {
-      if (m.type === 'in') f.push({ acc: m.acc, ts: m.ts, cny: m.cny, label: m.note || 'Para eklendi' });
-      if (m.type === 'out') f.push({ acc: m.acc, ts: m.ts, cny: -m.cny, label: m.note || 'Para çıktı' });
+      const cur = accCur(m.acc);
+      if (m.type === 'in') push(m.acc, m.ts, mvAmt(m), cur, m.note || 'Para eklendi');
+      if (m.type === 'out') push(m.acc, m.ts, -mvAmt(m), cur, m.note || 'Para çıktı');
       if (m.type === 'xfer') {
-        f.push({ acc: m.acc, ts: m.ts, cny: -m.cny, label: '⇄ ' + methodById(m.to).name + "'a" });
-        f.push({ acc: m.to, ts: m.ts, cny: m.cny, label: '⇄ ' + methodById(m.acc).name + "'dan" });
+        push(m.acc, m.ts, -mvAmt(m), cur, '⇄ ' + methodById(m.to).name + "'a");
+        if (m.amt2 != null) push(m.to, m.ts, m.amt2, accCur(m.to), '⇄ ' + methodById(m.acc).name + "'dan");
+        else push(m.to, m.ts, mvAmt(m), cur, '⇄ ' + methodById(m.acc).name + "'dan");
       }
     });
     db.debts.forEach(d => {
       const sign = d.dir === 'out' ? 1 : -1; // borç aldım → para girdi; borç verdim → para çıktı
-      if (d.acc) f.push({ acc: d.acc, ts: d.ts, cny: sign * d.cny, label: (d.dir === 'out' ? 'Borç alındı: ' : 'Borç verildi: ') + d.who });
-      (d.paid || []).forEach(p => { if (p.acc) f.push({ acc: p.acc, ts: p.ts, cny: -sign * p.cny, label: (d.dir === 'out' ? 'Borç ödendi: ' : 'Borç geri geldi: ') + d.who }); });
+      push(d.acc, d.ts, sign * debtAmt(d), debtCur(d), (d.dir === 'out' ? 'Borç alındı: ' : 'Borç verildi: ') + d.who);
+      (d.paid || []).forEach(p => push(p.acc, p.ts, -sign * paidAmt(p), debtCur(d), (d.dir === 'out' ? 'Borç ödendi: ' : 'Borç geri geldi: ') + d.who));
     });
     return f;
   }
   function balances() {
     const F = flows(), res = {};
-    ACC_IDS.forEach(id => {
-      const set = db.moves.filter(m => m.type === 'set' && m.acc === id).sort((a, b) => b.ts - a.ts)[0];
-      if (!set) { res[id] = null; return; }
-      const after = F.filter(x => x.acc === id && x.ts > set.ts).sort((a, b) => b.ts - a.ts);
-      res[id] = { bal: c2(set.cny + after.reduce((s, x) => s + x.cny, 0)), at: set.ts, recent: after.slice(0, 6) };
+    ACCS.forEach(a => {
+      const set = db.moves.filter(m => m.type === 'set' && m.acc === a.id).sort((x, y) => y.ts - x.ts)[0];
+      if (!set) { res[a.id] = null; return; }
+      const after = F.filter(x => x.acc === a.id && x.ts > set.ts).sort((x, y) => y.ts - x.ts);
+      const bal = c2(mvAmt(set) + after.reduce((s, x) => s + x.amt, 0));
+      res[a.id] = { bal, cur: a.cur, cny: toCny(bal, a.cur), at: set.ts, recent: after.slice(0, 6) };
     });
     return res;
   }
 
-  /* Borçlar kişi bazında: bölüşmelerden ve elle eklenen borçlardan */
-  const debtRemaining = d => c2(d.cny - (d.paid || []).reduce((s, p) => s + p.cny, 0));
+  /* Borçlar kişi bazında: bölüşmelerden ve elle eklenen borçlardan (kalan tutar borcun kendi para biriminde) */
+  const debtRemaining = d => c2(debtAmt(d) - (d.paid || []).reduce((s, p) => s + paidAmt(p), 0));
   function debtsByPerson() {
     const owed = new Map(), iowe = new Map();
     const add = (map, who, item) => {
@@ -187,11 +214,11 @@
       const e = map.get(k); e.total += item.cny; e.items.push(item);
     };
     db.tx.forEach(t => splitSlots(t).forEach(sl => {
-      if (sl.pending > 0.005) add(owed, sl.name, { kind: 'split', t, slot: sl.i, amt: sl.pending, cny: ratio(t, sl.pending), title: mname(t.orig) || t.note || catById(t.cat).name, ts: t.ts });
+      if (sl.pending > 0.005) add(owed, sl.name, { kind: 'split', t, slot: sl.i, amt: sl.pending, cur: t.cur, cny: ratio(t, sl.pending), title: mname(t.orig) || t.note || catById(t.cat).name, ts: t.ts });
     }));
     db.debts.forEach(d => {
       const rem = debtRemaining(d);
-      if (rem > 0.005) add(d.dir === 'in' ? owed : iowe, d.who, { kind: 'debt', d, amt: rem, cny: rem, title: d.note || (d.dir === 'in' ? 'Borç verdim' : 'Borç'), ts: d.ts });
+      if (rem > 0.005) add(d.dir === 'in' ? owed : iowe, d.who, { kind: 'debt', d, amt: rem, cur: debtCur(d), cny: toCny(rem, debtCur(d)), title: d.note || (d.dir === 'in' ? 'Borç verdim' : 'Borç'), ts: d.ts });
     });
     const sort = m => [...m.values()].sort((a, b) => b.total - a.total);
     return { owed: sort(owed), iowe: sort(iowe) };
@@ -233,32 +260,42 @@
   function renderWallet() {
     const bals = balances();
     const known = ACC_IDS.filter(id => bals[id]);
-    const total = known.reduce((s, id) => s + bals[id].bal, 0);
+    const total = known.reduce((s, id) => s + bals[id].cny, 0);
+    // para birimi bazında: "¥1.200 · ₺3.000"
+    const byCur = {};
+    known.forEach(id => { byCur[bals[id].cur] = (byCur[bals[id].cur] || 0) + bals[id].bal; });
+    const curLine = CUR_ORDER.filter(c => byCur[c] != null).map(c => fmt(byCur[c], c)).join(' + ');
     $('#w-total').textContent = known.length ? fmtDisp(total) : '—';
     $('#w-sub').textContent = known.length
-      ? `${others(total)}${known.length < ACC_IDS.length ? ` · ${ACC_IDS.length - known.length} hesabın bakiyesi girilmedi` : ''}`
+      ? `${Object.keys(byCur).length > 1 ? curLine + ' · ' : others(total) + ' · '}${known.length < ACC_IDS.length ? `${ACC_IDS.length - known.length} hesabın bakiyesi girilmedi` : 'tüm hesaplar'}`
       : 'Hesaplara dokunup şu anki bakiyeni gir';
     $('#w-accounts').innerHTML = ACCS.map(a => {
       const b = bals[a.id];
-      const sub = b ? `Bakiye ${dayShort.format(b.at)} girildi${b.recent.length ? ` · sonra ${b.recent.length} hareket` : ''}` : 'Bakiye girilmedi';
+      const sub = b ? `Bakiye ${dayShort.format(b.at)} girildi${b.recent.length ? ` · sonra ${b.recent.length} hareket` : ''}${a.cur !== dispCur() ? ` · ≈ ${fmtDisp(b.cny)}` : ''}` : `Bakiye girilmedi · ${CURS[a.cur]} ${a.cur}`;
       return `<button class="acc-row" data-acc="${a.id}">${mdot(a.id)}
-        <span class="acc-main"><div class="acc-name">${a.name}</div><div class="acc-sub">${esc(sub)}</div></span>
-        <span class="acc-bal ${!b ? 'unknown' : b.bal < 0 ? 'neg' : ''}">${b ? fmtDisp(b.bal) : 'Bakiye gir ›'}</span></button>`;
-    }).join('');
+        <span class="acc-main"><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(sub)}</div></span>
+        <span class="acc-bal ${!b ? 'unknown' : b.bal < 0 ? 'neg' : ''}">${b ? fmt(b.bal, a.cur) : 'Bakiye gir ›'}</span></button>`;
+    }).join('') + '<button class="link-btn" id="btn-add-acc">＋ Hesap ekle (ör. Nakit ₺, Türk kartı)</button>';
 
     const { owed, iowe } = debtsByPerson();
     const personRows = (list, dir) => list.length ? list.map((p, i) => `<button class="person-row" data-dir="${dir}" data-i="${i}">
         <span class="pr-ico">${p.who ? '👤' : '❔'}</span>
         <span class="pr-main"><div class="pr-name">${esc(p.who || 'İsimsiz')}</div><div class="pr-sub">${(() => { const u = [...new Set(p.items.map(x => x.title))]; return esc(u.slice(0, 3).join(', ')) + (u.length > 3 ? '…' : '') + (!p.who && p.items.length > 1 ? ` · ${p.items.length} kişi` : ''); })()}</div></span>
-        <span class="pr-amt">${fmtDisp(p.total)}</span></button>`).join('')
+        <span class="pr-amt">${personAmt(p)}</span></button>`).join('')
       : `<div class="w-empty">${dir === 'owed' ? 'Kimsenin sana borcu yok.' : 'Kimseye borcun yok. 👍'}</div>`;
     $('#w-owed').innerHTML = personRows(owed, 'owed');
     $('#w-iowe').innerHTML = personRows(iowe, 'iowe');
-    $('#w-owed-total').textContent = owed.length ? fmtDisp(owed.reduce((s, p) => s + p.total, 0)) : '';
-    $('#w-iowe-total').textContent = iowe.length ? fmtDisp(iowe.reduce((s, p) => s + p.total, 0)) : '';
+    const groupAmt = list => personAmt({ items: list.flatMap(p => p.items), total: list.reduce((s, p) => s + p.total, 0) });
+    $('#w-owed-total').textContent = owed.length ? groupAmt(owed) : '';
+    $('#w-iowe-total').textContent = iowe.length ? groupAmt(iowe) : '';
     WALLET_CACHE = { owed, iowe };
   }
   let WALLET_CACHE = { owed: [], iowe: [] };
+  // kişinin borçları tek para birimindeyse o birimde göster (₺200), karışıksa ana para biriminde
+  function personAmt(p) {
+    const curs = [...new Set(p.items.map(x => x.cur || 'CNY'))];
+    return curs.length === 1 ? fmt(p.items.reduce((s, x) => s + x.amt, 0), curs[0]) : fmtDisp(p.total);
+  }
 
   /* genel pencere */
   let modalOnSeg = null; // açık penceredeki seçim değişince çağrılır
@@ -290,57 +327,125 @@
   });
   const segHtml = (name, opts, val) => `<div class="seg" data-seg="${name}" data-value="${val}">${opts.map(([v, l]) => `<button type="button" data-segv="${v}" class="${v === val ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   const segVal = name => { const s = $(`#modal-body [data-seg="${name}"]`); return s ? s.dataset.value : null; };
-  const accOpts = (withNone) => [...ACCS.map(a => [a.id, a.name]), ...(withNone ? [['', 'Hiçbiri']] : [])];
+  const accOpts = (withNone) => [...ACCS.map(a => [a.id, esc(a.name)]), ...(withNone ? [['', 'Hiçbiri']] : [])];
+  const curOpts = CUR_ORDER.map(c => [c, `${CURS[c]} ${c}`]);
+  const typeOpts = Object.entries(TYPES).map(([k, v]) => [k, v.name]);
   const numIn = sel => { const el = $(sel); return el ? parseFloat(String(el.value).replace(/\s/g, '').replace(',', '.')) : NaN; };
   const peopleDatalist = () => { $('#people-list').innerHTML = db.people.map(p => `<option value="${esc(p)}">`).join(''); };
 
-  // hesaba dokun → gerçek bakiyeyi gir + son hareketler
+  // hesaba dokun → gerçek bakiyeyi gir + son hareketler + düzenle/sil
   $('#w-accounts').addEventListener('click', e => {
+    if (e.target.closest('#btn-add-acc')) return openAccountForm(null);
     const r = e.target.closest('[data-acc]'); if (!r) return;
-    const id = r.dataset.acc, a = methodById(id), b = balances()[id];
+    const id = r.dataset.acc, a = ACCS.find(x => x.id === id), b = balances()[id];
     const mv = b && b.recent.length ? `<div class="mv-list"><div class="muted">Son girişten sonraki hareketler:</div>${b.recent.map(x =>
-      `<div class="mv"><span>${dayShort.format(x.ts)} · ${esc(x.label)}</span><b class="${x.cny > 0 ? 'plus' : ''}">${x.cny > 0 ? '+' : ''}${fmt(x.cny)}</b></div>`).join('')}</div>` : '';
+      `<div class="mv"><span>${dayShort.format(x.ts)} · ${esc(x.label)}</span><b class="${x.amt > 0 ? 'plus' : ''}">${x.amt > 0 ? '+' : ''}${fmt(x.amt, a.cur)}</b></div>`).join('')}</div>` : '';
     openModal({
-      title: a.name,
-      body: `<div>${b ? `Uygulamadaki bakiye: <b>${fmt(b.bal)}</b>` : `${a.name} uygulamasına bak ve şu anki bakiyeni yaz.`}</div>
-        <label class="f">Gerçek bakiye (¥)<input id="m-bal" type="text" inputmode="decimal" placeholder="örn. 1250,80" value="${b ? String(b.bal).replace('.', ',') : ''}"></label>
-        <div class="muted small">Bundan sonra ${a.name} ile yaptığın harcamalar bu bakiyeden düşer, gelen paralar eklenir. Arada bir gerçek bakiyeyi girerek düzeltebilirsin.</div>${mv}`,
+      title: `${a.name} · ${CURS[a.cur]}`,
+      body: `<div>${b ? `Uygulamadaki bakiye: <b>${fmt(b.bal, a.cur)}</b>` : `Şu anki gerçek bakiyeni yaz (${CURS[a.cur]} ${a.cur}).`}</div>
+        <label class="f">Gerçek bakiye (${CURS[a.cur]})<input id="m-bal" type="text" inputmode="decimal" placeholder="örn. 1250,80" value="${b ? String(b.bal).replace('.', ',') : ''}"></label>
+        <div class="muted small">Bundan sonra bu hesapla yaptığın harcamalar bakiyeden düşer, gelen paralar eklenir. Arada bir gerçek bakiyeyi girerek düzeltebilirsin.</div>${mv}
+        <button class="link-btn" id="m-edit-acc" type="button">✎ Hesabı düzenle / sil</button>`,
       buttons: [{ label: 'Vazgeç' }, { label: 'Kaydet', primary: true, onClick: () => {
         const v = numIn('#m-bal'); if (isNaN(v)) { toast('Bir tutar yaz'); return false; }
-        db.moves.push({ id: newId(), type: 'set', acc: id, cny: c2(v), ts: Date.now() });
-        save(); render(); toast(`${a.name} bakiyesi: ${fmt(v)}`);
+        db.moves.push({ id: newId(), type: 'set', acc: id, amt: c2(v), ts: Date.now() });
+        save(); render(); toast(`${a.name} bakiyesi: ${fmt(v, a.cur)}`);
       } }],
     });
+    $('#m-edit-acc').onclick = () => openAccountForm(a);
     setTimeout(() => { const i = $('#m-bal'); if (i) i.select(); }, 50);
   });
 
-  $('#btn-income').addEventListener('click', () => openModal({
-    title: 'Para ekle',
-    body: `<div class="muted small">Maaş, yükleme, iade gibi dışarıdan gelen para.</div>
-      <label class="f">Hangi hesaba?${segHtml('acc', accOpts(false), 'card')}</label>
-      <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>
-      <label class="f">Açıklama<input id="m-note" type="text" placeholder="örn. Maaş"></label>`,
-    buttons: [{ label: 'Vazgeç' }, { label: 'Ekle', primary: true, onClick: () => {
-      const v = numIn('#m-amt'); if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
-      db.moves.push({ id: newId(), type: 'in', acc: segVal('acc'), cny: c2(v), ts: Date.now(), note: $('#m-note').value.trim() });
-      save(); render(); toast(`${fmt(v)} eklendi → ${methodById(segVal('acc')).name}`);
-    } }],
-  }));
+  // hesap ekle / düzenle / sil
+  const accountUsed = id => db.tx.some(t => t.method === id) || db.moves.some(m => m.acc === id || m.to === id)
+    || db.debts.some(d => d.acc === id || (d.paid || []).some(p => p.acc === id))
+    || db.tx.some(t => ((t.split && t.split.got) || []).some(g => g.acc === id));
+  function openAccountForm(a) {
+    const isNew = !a, used = a ? accountUsed(a.id) : false;
+    const isDefault = a && DEFAULT_ACCOUNTS.some(d => d.id === a.id);
+    openModal({
+      title: isNew ? 'Yeni hesap' : 'Hesabı düzenle',
+      body: `<label class="f">Türü${segHtml('type', typeOpts, a ? a.type : 'cash')}</label>
+        <label class="f">Para birimi${used ? `<div class="muted small">${CURS[a.cur]} ${a.cur} (kayıtlı hareketler olduğu için değiştirilemez)</div>` : segHtml('cur', curOpts, a ? a.cur : 'TRY')}</label>
+        <label class="f">Adı<input id="m-name" type="text" value="${a ? esc(a.name) : ''}" placeholder="örn. Nakit ₺"></label>
+        ${a && !isDefault ? `<button class="link-btn danger" id="m-del-acc" type="button">Hesabı sil</button>` : ''}`,
+      buttons: [{ label: 'Vazgeç' }, { label: isNew ? 'Ekle' : 'Kaydet', primary: true, onClick: () => {
+        const type = segVal('type'), cur = used ? a.cur : segVal('cur');
+        const name = $('#m-name').value.trim() || `${TYPES[type].name} ${CURS[cur]}`;
+        if (isNew) db.accounts.push({ id: 'a' + newId(), name, type, cur });
+        else Object.assign(db.accounts.find(x => x.id === a.id), { name, type, cur });
+        syncAccounts(); save(); render(); toast(isNew ? `${name} eklendi — dokunup bakiyesini gir` : 'Hesap güncellendi');
+      } }],
+    });
+    // ad boşken türe/para birimine göre öneri yaz
+    let touched = !!a;
+    $('#m-name').addEventListener('input', () => { touched = true; });
+    const suggest = () => { if (!touched) { const t = segVal('type'), c = used ? a.cur : segVal('cur'); $('#m-name').value = `${TYPES[t].name} ${CURS[c]}`; } };
+    modalOnSeg = suggest; suggest();
+    const del = $('#m-del-acc');
+    if (del) del.onclick = () => {
+      if (used) { toast('Bu hesapla kayıtlar var; silinemez (adını değiştirebilirsin)'); return; }
+      if (!confirm(`${a.name} silinsin mi?`)) return;
+      db.accounts = db.accounts.filter(x => x.id !== a.id);
+      db.moves = db.moves.filter(m => m.acc !== a.id);
+      syncAccounts(); save(); closeModal(); toast('Hesap silindi');
+    };
+  }
 
-  $('#btn-xfer').addEventListener('click', () => openModal({
-    title: 'Hesaplar arası',
-    body: `<div class="muted small">Örn. karttan Alipay'e yükleme, WeChat'ten karta çekme.</div>
-      <label class="f">Nereden?${segHtml('from', accOpts(false), 'card')}</label>
-      <label class="f">Nereye?${segHtml('to', accOpts(false), 'alipay')}</label>
-      <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>`,
-    buttons: [{ label: 'Vazgeç' }, { label: 'Aktar', primary: true, onClick: () => {
-      const v = numIn('#m-amt'), from = segVal('from'), to = segVal('to');
-      if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
-      if (from === to) { toast('İki farklı hesap seç'); return false; }
-      db.moves.push({ id: newId(), type: 'xfer', acc: from, to, cny: c2(v), ts: Date.now() });
-      save(); render(); toast(`${fmt(v)}: ${methodById(from).name} → ${methodById(to).name}`);
-    } }],
-  }));
+  $('#btn-income').addEventListener('click', () => {
+    openModal({
+      title: 'Para ekle',
+      body: `<div class="muted small">Maaş, yükleme, iade gibi dışarıdan gelen para.</div>
+        <label class="f">Hangi hesaba?${segHtml('acc', accOpts(false), ACC_IDS.includes('card') ? 'card' : ACC_IDS[0])}</label>
+        <label class="f"><span id="m-amt-l"></span><input id="m-amt" type="text" inputmode="decimal"></label>
+        <label class="f">Açıklama<input id="m-note" type="text" placeholder="örn. Maaş"></label>`,
+      buttons: [{ label: 'Vazgeç' }, { label: 'Ekle', primary: true, onClick: () => {
+        const v = numIn('#m-amt'), acc = segVal('acc'); if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
+        db.moves.push({ id: newId(), type: 'in', acc, amt: c2(v), ts: Date.now(), note: $('#m-note').value.trim() });
+        save(); render(); toast(`${fmt(v, accCur(acc))} eklendi → ${methodById(acc).name}`);
+      } }],
+    });
+    modalOnSeg = () => { $('#m-amt-l').textContent = `Tutar (${CURS[accCur(segVal('acc'))]})`; };
+    modalOnSeg();
+  });
+
+  $('#btn-xfer').addEventListener('click', () => {
+    const def2 = ACC_IDS.includes('alipay') ? 'alipay' : ACC_IDS[1] || ACC_IDS[0];
+    openModal({
+      title: 'Hesaplar arası / döviz bozdur',
+      body: `<div class="muted small">Örn. karttan Alipay'e yükleme ya da ₺ nakiti ¥'ye bozdurma.</div>
+        <label class="f">Nereden?${segHtml('from', accOpts(false), ACC_IDS.includes('card') ? 'card' : ACC_IDS[0])}</label>
+        <label class="f">Nereye?${segHtml('to', accOpts(false), def2)}</label>
+        <label class="f"><span id="m-amt-l"></span><input id="m-amt" type="text" inputmode="decimal"></label>
+        <label class="f" id="m-amt2-w"><span id="m-amt2-l"></span><input id="m-amt2" type="text" inputmode="decimal"></label>
+        <div class="muted small" id="m-rate"></div>`,
+      buttons: [{ label: 'Vazgeç' }, { label: 'Aktar', primary: true, onClick: () => {
+        const v = numIn('#m-amt'), from = segVal('from'), to = segVal('to');
+        if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
+        if (from === to) { toast('İki farklı hesap seç'); return false; }
+        const m = { id: newId(), type: 'xfer', acc: from, to, amt: c2(v), ts: Date.now() };
+        if (accCur(from) !== accCur(to)) {
+          const v2 = numIn('#m-amt2'); if (!(v2 > 0)) { toast('Gelen tutarı yaz'); return false; }
+          m.amt2 = c2(v2);
+        }
+        db.moves.push(m);
+        save(); render(); toast(`${fmt(v, accCur(from))}: ${methodById(from).name} → ${methodById(to).name}${m.amt2 ? ` (${fmt(m.amt2, accCur(to))})` : ''}`);
+      } }],
+    });
+    let typed2 = false;
+    const sync = () => {
+      const f = accCur(segVal('from')), t = accCur(segVal('to')), diff = f !== t;
+      $('#m-amt-l').textContent = diff ? `Çıkan tutar (${CURS[f]})` : `Tutar (${CURS[f]})`;
+      $('#m-amt2-w').classList.toggle('hidden', !diff);
+      $('#m-amt2-l').textContent = `Giren tutar (${CURS[t]}) — bozdurduğun kur farklıysa düzelt`;
+      const v = numIn('#m-amt');
+      if (diff && !typed2) $('#m-amt2').value = v > 0 ? String(c2(conv(v, f, t))).replace('.', ',') : '';
+      $('#m-rate').textContent = diff ? `Güncel kur: 1 ${CURS[f]} ≈ ${fmtNum(c2(conv(1, f, t) * 100) / 100)} ${CURS[t]}` : '';
+    };
+    $('#m-amt').addEventListener('input', sync);
+    $('#m-amt2').addEventListener('input', () => { typed2 = true; });
+    modalOnSeg = sync; sync();
+  });
 
   // borç / alacak ekle
   $('#btn-add-debt').addEventListener('click', () => openDebtForm('out'));
@@ -351,7 +456,8 @@
       title: 'Borç / alacak ekle',
       body: `${segHtml('dir', [['out', 'Ben borçluyum'], ['in', 'O bana borçlu']], dir)}
         <label class="f">Kim?<input id="m-who" type="text" list="people-list" placeholder="İsim" autocomplete="off"></label>
-        <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>
+        <label class="f">Para birimi${segHtml('cur', curOpts, 'CNY')}</label>
+        <label class="f"><span id="m-amt-l">Tutar</span><input id="m-amt" type="text" inputmode="decimal"></label>
         <label class="f">Ne için?<input id="m-note" type="text" placeholder="örn. Akşam yemeği, taksi"></label>
         <label class="f" id="m-acc-wrap"><span id="m-acc-label"></span>${segHtml('acc', accOpts(true), '')}</label>
         <label class="f" id="m-cat-wrap">Harcama olarak da kaydet (kategori)<select id="m-cat"><option value="">— Kaydetme —</option>${catOpts}</select></label>`,
@@ -359,21 +465,22 @@
         const d = segVal('dir'), who = $('#m-who').value.trim(), v = numIn('#m-amt'), acc = segVal('acc') || null;
         if (!who) { toast('Kişinin adını yaz'); return false; }
         if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
-        const note = $('#m-note').value.trim();
-        const debt = { id: newId(), dir: d, who, cny: c2(v), note, ts: Date.now(), acc, paid: [] };
+        const note = $('#m-note').value.trim(), cur = segVal('cur') || 'CNY';
+        const debt = { id: newId(), dir: d, who, amt: c2(v), cur, cny: c2(toCny(v, cur)), note, ts: Date.now(), acc, paid: [] };
         const cat = $('#m-cat').value;
         if (d === 'out' && !acc && cat) {
           // biri benim yerime ödedi → bu benim harcamam; para henüz hesabımdan çıkmadı
-          const tx = { id: newId(), ts: Date.now(), amt: c2(v), cur: 'CNY', cny: c2(v), method: 'owed', cat, note: note || `${who} ödedi`, orig: '', src: 'manual', created: Date.now() };
+          const tx = { id: newId(), ts: Date.now(), amt: c2(v), cur, cny: c2(toCny(v, cur)), method: 'owed', cat, note: note || `${who} ödedi`, orig: '', src: 'manual', created: Date.now() };
           db.tx.push(tx); debt.txId = tx.id;
         }
         db.debts.push(debt); rememberPerson(who);
         save(); render();
-        toast(d === 'out' ? `${who}'a ${fmt(v)} borçlusun` : `${who} sana ${fmt(v)} borçlu`);
+        toast(d === 'out' ? `${who}'a ${fmt(v, cur)} borçlusun` : `${who} sana ${fmt(v, cur)} borçlu`);
       } }],
     });
     const sync = () => {
       const d = segVal('dir'), acc = segVal('acc');
+      $('#m-amt-l').textContent = `Tutar (${CURS[segVal('cur') || 'CNY']})`;
       $('#m-acc-label').textContent = d === 'out' ? 'Para hesabıma girdi mi? (borç aldıysan)' : 'Para hangi hesabımdan çıktı? (borç verdiysen)';
       $('#m-cat-wrap').classList.toggle('hidden', !(d === 'out' && !acc));
     };
@@ -396,12 +503,12 @@
     const draw = () => {
       const q = fresh();
       if (!q) { closeModal(); toast(dir === 'owed' ? `${who || 'İsimsiz'}: hepsi ödendi ✓` : `${who} borcu kapandı ✓`); return; }
-      $('#modal-title').textContent = `${who || 'İsimsiz'} · ${fmtDisp(q.total)}`;
+      $('#modal-title').textContent = `${who || 'İsimsiz'} · ${personAmt(q)}`;
       $('#modal-body').innerHTML = `<div class="muted small">${dir === 'owed' ? 'Sana olan borcu. Para geldiyse “Ödedi”ye dokun.' : 'Senin ona borcun. Ödediysen “Ödedim”e dokun.'}</div>
         <label class="f">${dir === 'owed' ? 'Para hangi hesabına geldi?' : 'Hangi hesabından ödedin?'}${segHtml('acc', accOpts(true), db.settings.recvAcc || 'wechat')}</label>
         ${q.items.map((it, i) => `<div class="item-row"><span class="ir-main"><div class="ir-title">${esc(it.title)}</div>
           <div class="ir-sub">${dayShort.format(it.ts)}${it.kind === 'split' ? ` · bölüşme (${splitInfo(it.t).n} kişi)` : ''}</div></span>
-          <b>${it.kind === 'split' ? fmt(it.amt, it.t.cur) : fmt(it.amt)}</b>
+          <b>${fmt(it.amt, it.cur)}</b>
           <button class="btn small" data-settle="${i}">${dir === 'owed' ? 'Ödedi' : 'Ödedim'}</button></div>`).join('')}`;
       $('#modal-body').querySelectorAll('[data-settle]').forEach(b => b.onclick = () => {
         const it = q.items[+b.dataset.settle], acc = segVal('acc') || null;
@@ -410,7 +517,7 @@
           const g = { a: it.amt, ts: Date.now(), who: it.slot }; if (acc) g.acc = acc; if (who) g.from = who;
           it.t.split.got = it.t.split.got || []; it.t.split.got.push(g);
         } else {
-          it.d.paid = it.d.paid || []; it.d.paid.push({ cny: it.amt, ts: Date.now(), acc });
+          it.d.paid = it.d.paid || []; it.d.paid.push({ amt: it.amt, ts: Date.now(), acc });
         }
         save(); draw();
       });
@@ -466,10 +573,10 @@
     const allPending = db.tx.filter(isPending);
     const pendTotal = allPending.reduce((s, t) => s + pendingCny(t), 0);
     $('#method-strip').innerHTML = METHODS.filter(m => byM[m.id]).map(m =>
-      `<span class="mpill">${mdot(m.id)}${m.name} ${fmtDisp(byM[m.id])}</span>`).join('')
+      `<span class="mpill">${mdot(m.id)}${esc(m.name)} ${fmtDisp(byM[m.id])}</span>`).join('')
       + (allPending.length && !pendingView ? `<button class="mpill pend" id="pend-pill">👥 Bekleyen ${fmtDisp(pendTotal)} (${allPending.length})</button>` : '')
       + (() => { const b = balances(), k = ACC_IDS.filter(id => b[id]); return k.length && !pendingView
-        ? `<button class="mpill pend" id="bal-pill">💰 Kalan ${fmtDisp(k.reduce((s, id) => s + b[id].bal, 0))}</button>` : ''; })();
+        ? `<button class="mpill pend" id="bal-pill">💰 Kalan ${fmtDisp(k.reduce((s, id) => s + b[id].cny, 0))}</button>` : ''; })();
 
     // gün gruplarına ayır
     const groups = new Map();
@@ -574,7 +681,7 @@
     $('#cur-seg').innerHTML = CUR_ORDER.map(c => `<button class="${c === S.cur ? 'on' : ''}" data-cur="${c}">${CURS[c]}</button>`).join('');
     // ödeme yöntemi
     $('#method-chips').innerHTML = METHODS.filter(m => m.id !== 'owed' || S.method === 'owed').map(m =>
-      `<button class="chip ${m.id === S.method ? 'on' : ''}" data-method="${m.id}">${mdot(m.id)}${m.name}</button>`).join('');
+      `<button class="chip ${m.id === S.method ? 'on' : ''}" data-method="${m.id}">${mdot(m.id)}${esc(m.name)}</button>`).join('');
     // sık kullanılanlar
     $('#freq-chips').innerHTML = S.mode === 'add' ? frequents().map((f, i) => {
       const c = catById(f.cat);
@@ -626,7 +733,7 @@
         <span class="sp-pamt">${f(sl.owed)}</span>
         ${S.split.closed ? '' : sl.pending > 0.005 ? `<button class="btn small" data-sa="paid" data-i="${sl.i}">Ödedi</button>` : '<span class="sp-ok">✓ Ödedi</span>'}</div>`).join('')}</div>
       ${s.pending > 0.005 && !S.split.closed ? `<div class="sp-row"><small>Paralar hangi hesabına geliyor?</small>
-        <div class="seg small">${ACCS.map(a => `<button type="button" data-sa="recv" data-acc="${a.id}" class="${a.id === recv ? 'on' : ''}">${a.name}</button>`).join('')}</div></div>` : ''}
+        <div class="seg small">${ACCS.map(a => `<button type="button" data-sa="recv" data-acc="${a.id}" class="${a.id === recv ? 'on' : ''}">${esc(a.name)}</button>`).join('')}</div></div>` : ''}
       <div class="sp-got">${(S.split.got || []).map((g, i) => `<span class="gchip">✓ ${f(g.a)}${(g.who != null && names[g.who]) || g.from ? ' · ' + esc((g.who != null && names[g.who]) || g.from) : ''} · ${dayShort.format(g.ts)}<button data-sa="del" data-i="${i}" aria-label="Sil">✕</button></span>`).join('')}</div>
       ${S.split.closed ? '<div class="sp-status">Kapatıldı: gelmeyen kısım senin harcaman sayılır.</div>'
         : s.pending > 0.005 ? `<div class="sp-status">Bekleyen: ${f(s.pending)}</div>
@@ -696,7 +803,13 @@
   }
 
   $('#cur-seg').addEventListener('click', e => { const b = e.target.closest('[data-cur]'); if (b) { S.cur = b.dataset.cur; renderSheet(); } });
-  $('#method-chips').addEventListener('click', e => { const b = e.target.closest('[data-method]'); if (b) { S.method = b.dataset.method; renderSheet(); } });
+  $('#method-chips').addEventListener('click', e => {
+    const b = e.target.closest('[data-method]'); if (!b) return;
+    S.method = b.dataset.method;
+    // ₺ hesabı seçilince tutar da ₺ olsun (istersen sonra elle değiştirebilirsin)
+    if (ACC_IDS.includes(S.method)) S.cur = accCur(S.method);
+    renderSheet();
+  });
   $('#keypad').addEventListener('click', e => {
     const b = e.target.closest('[data-key]'); if (!b || !S) return;
     const k = b.dataset.key; let s = S.amountStr;
@@ -854,7 +967,7 @@
     }).join('') + db.debts.filter(d => d.dir === 'in' && debtRemaining(d) > 0.005).map(d =>
       `<button class="pick" data-debt="${d.id}"><span class="pk-main"><div class="pk-title">👤 ${esc(d.who)} · ${esc(d.note || 'Borç verdim')}</div>
         <div class="pk-sub">${dayShort.format(d.ts)} · alacak</div></span>
-        <span class="pk-amt">kalan<br><b>${fmt(debtRemaining(d))}</b></span></button>`).join('')
+        <span class="pk-amt">kalan<br><b>${fmt(debtRemaining(d), debtCur(d))}</b></span></button>`).join('')
       + '<button class="pick alt" data-id="__expense">Bu bir harcama, normal kaydet</button>';
     const ov = $('#picker');
     ov.classList.remove('hidden');
@@ -866,9 +979,9 @@
       if (b.dataset.id === '__expense') return nextScan({ ...item, r: { ...r, incoming: false } });
       if (b.dataset.debt) {
         const d = db.debts.find(x => x.id === b.dataset.debt); if (!d) return nextScan();
-        const p = { cny: Math.min(c2(amt), debtRemaining(d)), ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
+        const p = { amt: Math.min(c2(conv(amt, 'CNY', debtCur(d))), debtRemaining(d)), ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
         d.paid = d.paid || []; d.paid.push(p); save(); render();
-        toast(`${fmt(p.cny)} ← ${d.who}` + (debtRemaining(d) > 0.005 ? ` · kalan ${fmt(debtRemaining(d))}` : ' · ✓ kapandı'), 'Geri al', () => {
+        toast(`${fmt(p.amt, debtCur(d))} ← ${d.who}` + (debtRemaining(d) > 0.005 ? ` · kalan ${fmt(debtRemaining(d), debtCur(d))}` : ' · ✓ kapandı'), 'Geri al', () => {
           const i = d.paid.indexOf(p); if (i >= 0) d.paid.splice(i, 1); save(); render();
         }, 5000);
         return setTimeout(nextScan, 300);
@@ -1175,13 +1288,13 @@
       const d = j && j.data ? j.data : j;
       if (!d || !Array.isArray(d.tx)) throw new Error('Geçersiz dosya');
       if (!confirm(`Yedekte ${d.tx.length} kayıt var. Mevcut ${db.tx.length} kaydın yerine geçsin mi?`)) return;
-      db = normalizeDb(d); save(); render(); toast('Yedek geri yüklendi');
+      db = normalizeDb(d); syncAccounts(); save(); render(); toast('Yedek geri yüklendi');
     } catch (err) { toast('Dosya okunamadı: ' + err.message); }
   });
   $('#btn-wipe').addEventListener('click', () => {
     if (!confirm('Tüm kayıtlar silinecek. Önce yedek aldın mı?')) return;
     if (!confirm('Emin misin? Bu işlem geri alınamaz.')) return;
-    db = normalizeDb(null); save(); render(); toast('Tüm veriler silindi');
+    db = normalizeDb(null); syncAccounts(); save(); render(); toast('Tüm veriler silindi');
   });
 
   /* ---------------- toast ---------------- */
@@ -1202,6 +1315,15 @@
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if (Date.now() - (db.settings.ratesAt || 0) > 12 * 3600e3 && navigator.onLine !== false) updateRates(false);
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    // yeni sürüm devreye girince bir kez yenile (bir şey yazılıyorsa sadece haber ver)
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      const busy = !$('#sheet').classList.contains('hidden') || !$('#modal').classList.contains('hidden');
+      if (busy) { toast('Yeni sürüm hazır — uygulamayı kapatıp açınca gelir', null, null, 6000); return; }
+      reloaded = true; location.reload();
+    });
     navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(reg => {
       // OCR dosyalarını arka planda önbelleğe al → tarama internetsiz de çalışsın
       if (navigator.onLine !== false && reg.active) reg.active.postMessage('warm-ocr');
