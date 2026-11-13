@@ -86,9 +86,39 @@
     </div>
   </section>
 
+  <!-- ============ CÜZDAN ============ -->
+  <section class="view" id="view-wallet">
+    <header class="top">
+      <h1 class="page-title">Cüzdan</h1>
+      <button class="icon-btn gear" id="btn-settings" aria-label="Ayarlar">⚙︎</button>
+    </header>
+    <div class="card hero">
+      <div class="hero-label">Toplam param</div>
+      <div class="hero-value" id="w-total">—</div>
+      <div class="hero-sub" id="w-sub"></div>
+    </div>
+    <div class="card">
+      <h2>Hesaplar</h2>
+      <div id="w-accounts"></div>
+      <div class="w-actions">
+        <button class="btn small" id="btn-income">＋ Para ekle</button>
+        <button class="btn small" id="btn-xfer">⇄ Hesaplar arası</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Bana borçlu olanlar <span class="h2-total" id="w-owed-total"></span></h2>
+      <div id="w-owed"></div>
+    </div>
+    <div class="card">
+      <h2>Benim borçlarım <span class="h2-total" id="w-iowe-total"></span></h2>
+      <div id="w-iowe"></div>
+    </div>
+    <button class="btn" id="btn-add-debt">＋ Borç / alacak ekle</button>
+  </section>
+
   <!-- ============ AYARLAR ============ -->
   <section class="view" id="view-settings">
-    <header class="top"><h1 class="page-title">Ayarlar</h1></header>
+    <header class="top"><button class="link-btn" id="btn-settings-back">‹ Cüzdan</button><h1 class="page-title">Ayarlar</h1><span style="width:60px"></span></header>
 
     <div class="card">
       <h2>Ana para birimi</h2>
@@ -155,10 +185,10 @@
   <!-- ============ ALT MENÜ ============ -->
   <nav class="tabbar">
     <button class="tab active" data-view="list"><span class="ti">🧾</span><span>Kayıtlar</span></button>
-    <button class="tab" data-view="stats"><span class="ti">📊</span><span>Özet</span></button>
+    <button class="tab" data-view="wallet"><span class="ti">👛</span><span>Cüzdan</span></button>
     <button class="tab add" id="btn-add" aria-label="Harcama ekle"><span>＋</span></button>
     <label class="tab" for="scan-input"><span class="ti">📷</span><span>Tara</span></label>
-    <button class="tab" data-view="settings"><span class="ti">⚙️</span><span>Ayarlar</span></button>
+    <button class="tab" data-view="stats"><span class="ti">📊</span><span>Özet</span></button>
   </nav>
   <input type="file" id="scan-input" accept="image/*" multiple hidden>
 </div>
@@ -226,6 +256,16 @@
     <button class="btn" id="picker-cancel">Atla</button>
   </div>
 </div>
+
+<!-- ============ GENEL PENCERE (bakiye, transfer, borç…) ============ -->
+<div class="overlay hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="picker-box">
+    <div class="picker-title" id="modal-title"></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-btns" id="modal-btns"></div>
+  </div>
+</div>
+<datalist id="people-list"></datalist>
 
 <div class="toast hidden" id="toast"><span id="toast-text"></span><button class="link-btn" id="toast-action"></button></div>
 <div class="tooltip hidden" id="tooltip"></div>

@@ -1,7 +1,7 @@
 /* Taha Muhasebe — tüm veriler telefonda (localStorage) */
 (() => {
   'use strict';
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const KEY = 'tm.data.v1';
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
@@ -26,7 +26,10 @@
     { id: 'wechat', name: 'WeChat', s: 'W', cls: 'm-wechat' },
     { id: 'card', name: 'Kart', s: 'K', cls: 'm-card' },
     { id: 'cash', name: 'Nakit', s: 'N', cls: 'm-cash' },
+    { id: 'owed', name: 'Borçla', s: 'B', cls: 'm-owed' }, // başkası benim yerime ödedi
   ];
+  const ACC_IDS = ['alipay', 'wechat', 'card', 'cash']; // gerçek hesaplar (bakiye tutulur)
+  const ACCS = METHODS.filter(m => ACC_IDS.includes(m.id));
   const CURS = { CNY: '¥', TRY: '₺', USD: '$' };
   const CUR_ORDER = ['CNY', 'TRY', 'USD'];
 
@@ -43,8 +46,13 @@
       tx: Array.isArray(d.tx) ? d.tx : [],
       cats: Array.isArray(d.cats) && d.cats.length ? d.cats : DEFAULT_CATS.map(c => ({ ...c })),
       merchants: d.merchants && typeof d.merchants === 'object' ? d.merchants : {},
+      // hesap hareketleri: set (gerçek bakiye) / in (para ekle) / out / xfer (hesaplar arası) — tutarlar ¥
+      moves: Array.isArray(d.moves) ? d.moves : [],
+      // borçlar: dir 'in' = bana borçlu, 'out' = ben borçluyum
+      debts: Array.isArray(d.debts) ? d.debts : [],
+      people: Array.isArray(d.people) ? d.people : [],
       settings: Object.assign({
-        displayCur: 'CNY', lastMethod: 'alipay', lastCur: 'CNY', nameLang: 'en',
+        displayCur: 'CNY', lastMethod: 'alipay', lastCur: 'CNY', nameLang: 'en', recvAcc: 'wechat',
         rates: { CNY: 1, TRY: 6.0, USD: 0.14 }, ratesAt: 0, lastBackup: 0, createdAt: Date.now(),
       }, d.settings || {}),
     };
@@ -119,6 +127,79 @@
   const pendingCny = t => { const s = splitInfo(t); return s ? ratio(t, s.pending) : 0; };
   const isPending = t => { const s = splitInfo(t); return !!s && s.pending > 0.005; };
   const sumCny = list => list.reduce((s, t) => s + netCny(t), 0);
+  const c2 = v => Math.round(v * 100) / 100;
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  /* Bölüşmedeki diğer kişiler (slot): her birinin payı ve ödediği */
+  function splitSlots(t) {
+    const s = splitInfo(t);
+    if (!s || s.n < 2) return [];
+    const k = s.n - 1, names = t.split.people || [];
+    const slots = Array.from({ length: k }, (_, i) => ({ i, name: names[i] || '', owed: s.expected / k, paid: 0 }));
+    const loose = [];
+    (t.split.got || []).forEach(g => { if (g.who != null && slots[g.who]) slots[g.who].paid += +g.a || 0; else loose.push(+g.a || 0); });
+    // kime ait olduğu belirtilmemiş ödemeleri sırayla boş slotlara dağıt
+    loose.forEach(a => { for (const sl of slots) { const r = sl.owed - sl.paid; if (r > 0.005 && a > 0.005) { const x = Math.min(r, a); sl.paid += x; a -= x; } } });
+    slots.forEach(sl => { sl.owed = c2(sl.owed); sl.paid = c2(sl.paid); sl.pending = t.split.closed ? 0 : Math.max(0, c2(sl.owed - sl.paid)); });
+    return slots;
+  }
+
+  /* Hesap bakiyeleri: son "gerçek bakiye" kaydı + ondan sonraki tüm hareketler */
+  function flows() {
+    const f = [];
+    db.tx.forEach(t => {
+      if (ACC_IDS.includes(t.method)) f.push({ acc: t.method, ts: t.ts, cny: -(+t.cny || 0), label: mname(t.orig) || t.note || catById(t.cat).name });
+      ((t.split && t.split.got) || []).forEach(g => { if (g.acc) f.push({ acc: g.acc, ts: g.ts, cny: ratio(t, g.a), label: '👥 ' + (g.from || 'Pay geldi') }); });
+    });
+    db.moves.forEach(m => {
+      if (m.type === 'in') f.push({ acc: m.acc, ts: m.ts, cny: m.cny, label: m.note || 'Para eklendi' });
+      if (m.type === 'out') f.push({ acc: m.acc, ts: m.ts, cny: -m.cny, label: m.note || 'Para çıktı' });
+      if (m.type === 'xfer') {
+        f.push({ acc: m.acc, ts: m.ts, cny: -m.cny, label: '⇄ ' + methodById(m.to).name + "'a" });
+        f.push({ acc: m.to, ts: m.ts, cny: m.cny, label: '⇄ ' + methodById(m.acc).name + "'dan" });
+      }
+    });
+    db.debts.forEach(d => {
+      const sign = d.dir === 'out' ? 1 : -1; // borç aldım → para girdi; borç verdim → para çıktı
+      if (d.acc) f.push({ acc: d.acc, ts: d.ts, cny: sign * d.cny, label: (d.dir === 'out' ? 'Borç alındı: ' : 'Borç verildi: ') + d.who });
+      (d.paid || []).forEach(p => { if (p.acc) f.push({ acc: p.acc, ts: p.ts, cny: -sign * p.cny, label: (d.dir === 'out' ? 'Borç ödendi: ' : 'Borç geri geldi: ') + d.who }); });
+    });
+    return f;
+  }
+  function balances() {
+    const F = flows(), res = {};
+    ACC_IDS.forEach(id => {
+      const set = db.moves.filter(m => m.type === 'set' && m.acc === id).sort((a, b) => b.ts - a.ts)[0];
+      if (!set) { res[id] = null; return; }
+      const after = F.filter(x => x.acc === id && x.ts > set.ts).sort((a, b) => b.ts - a.ts);
+      res[id] = { bal: c2(set.cny + after.reduce((s, x) => s + x.cny, 0)), at: set.ts, recent: after.slice(0, 6) };
+    });
+    return res;
+  }
+
+  /* Borçlar kişi bazında: bölüşmelerden ve elle eklenen borçlardan */
+  const debtRemaining = d => c2(d.cny - (d.paid || []).reduce((s, p) => s + p.cny, 0));
+  function debtsByPerson() {
+    const owed = new Map(), iowe = new Map();
+    const add = (map, who, item) => {
+      const k = (who || '').trim();
+      if (!map.has(k)) map.set(k, { who: k, total: 0, items: [] });
+      const e = map.get(k); e.total += item.cny; e.items.push(item);
+    };
+    db.tx.forEach(t => splitSlots(t).forEach(sl => {
+      if (sl.pending > 0.005) add(owed, sl.name, { kind: 'split', t, slot: sl.i, amt: sl.pending, cny: ratio(t, sl.pending), title: mname(t.orig) || t.note || catById(t.cat).name, ts: t.ts });
+    }));
+    db.debts.forEach(d => {
+      const rem = debtRemaining(d);
+      if (rem > 0.005) add(d.dir === 'in' ? owed : iowe, d.who, { kind: 'debt', d, amt: rem, cny: rem, title: d.note || (d.dir === 'in' ? 'Borç verdim' : 'Borç'), ts: d.ts });
+    });
+    const sort = m => [...m.values()].sort((a, b) => b.total - a.total);
+    return { owed: sort(owed), iowe: sort(iowe) };
+  }
+  function rememberPerson(name) {
+    name = (name || '').trim(); if (!name) return;
+    db.people = [name, ...db.people.filter(p => p !== name)].slice(0, 50);
+  }
 
   /* ---------------- gezinme ---------------- */
   function setView(v) {
@@ -142,7 +223,200 @@
     $('#stats-month').textContent = title;
     if (view === 'list') renderList();
     if (view === 'stats') renderStats();
+    if (view === 'wallet') renderWallet();
     if (view === 'settings') renderSettings();
+  }
+  $('#btn-settings').addEventListener('click', () => setView('settings'));
+  $('#btn-settings-back').addEventListener('click', () => setView('wallet'));
+
+  /* ---------------- CÜZDAN ---------------- */
+  function renderWallet() {
+    const bals = balances();
+    const known = ACC_IDS.filter(id => bals[id]);
+    const total = known.reduce((s, id) => s + bals[id].bal, 0);
+    $('#w-total').textContent = known.length ? fmtDisp(total) : '—';
+    $('#w-sub').textContent = known.length
+      ? `${others(total)}${known.length < ACC_IDS.length ? ` · ${ACC_IDS.length - known.length} hesabın bakiyesi girilmedi` : ''}`
+      : 'Hesaplara dokunup şu anki bakiyeni gir';
+    $('#w-accounts').innerHTML = ACCS.map(a => {
+      const b = bals[a.id];
+      const sub = b ? `Bakiye ${dayShort.format(b.at)} girildi${b.recent.length ? ` · sonra ${b.recent.length} hareket` : ''}` : 'Bakiye girilmedi';
+      return `<button class="acc-row" data-acc="${a.id}">${mdot(a.id)}
+        <span class="acc-main"><div class="acc-name">${a.name}</div><div class="acc-sub">${esc(sub)}</div></span>
+        <span class="acc-bal ${!b ? 'unknown' : b.bal < 0 ? 'neg' : ''}">${b ? fmtDisp(b.bal) : 'Bakiye gir ›'}</span></button>`;
+    }).join('');
+
+    const { owed, iowe } = debtsByPerson();
+    const personRows = (list, dir) => list.length ? list.map((p, i) => `<button class="person-row" data-dir="${dir}" data-i="${i}">
+        <span class="pr-ico">${p.who ? '👤' : '❔'}</span>
+        <span class="pr-main"><div class="pr-name">${esc(p.who || 'İsimsiz')}</div><div class="pr-sub">${(() => { const u = [...new Set(p.items.map(x => x.title))]; return esc(u.slice(0, 3).join(', ')) + (u.length > 3 ? '…' : '') + (!p.who && p.items.length > 1 ? ` · ${p.items.length} kişi` : ''); })()}</div></span>
+        <span class="pr-amt">${fmtDisp(p.total)}</span></button>`).join('')
+      : `<div class="w-empty">${dir === 'owed' ? 'Kimsenin sana borcu yok.' : 'Kimseye borcun yok. 👍'}</div>`;
+    $('#w-owed').innerHTML = personRows(owed, 'owed');
+    $('#w-iowe').innerHTML = personRows(iowe, 'iowe');
+    $('#w-owed-total').textContent = owed.length ? fmtDisp(owed.reduce((s, p) => s + p.total, 0)) : '';
+    $('#w-iowe-total').textContent = iowe.length ? fmtDisp(iowe.reduce((s, p) => s + p.total, 0)) : '';
+    WALLET_CACHE = { owed, iowe };
+  }
+  let WALLET_CACHE = { owed: [], iowe: [] };
+
+  /* genel pencere */
+  let modalOnSeg = null; // açık penceredeki seçim değişince çağrılır
+  $('#modal-body').addEventListener('segchange', () => { if (modalOnSeg) modalOnSeg(); });
+  function openModal({ title, body, buttons }) {
+    modalOnSeg = null;
+    $('#modal-title').textContent = title;
+    $('#modal-body').innerHTML = body;
+    const box = $('#modal-btns');
+    box.innerHTML = '';
+    (buttons || [{ label: 'Kapat' }]).forEach(b => {
+      const el = document.createElement('button');
+      el.className = 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
+      el.textContent = b.label;
+      el.onclick = () => { if (b.onClick && b.onClick() === false) return; closeModal(); };
+      box.appendChild(el);
+    });
+    $('#modal').classList.remove('hidden');
+  }
+  const closeModal = () => { $('#modal').classList.add('hidden'); modalOnSeg = null; render(); };
+  $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+  // pencere içindeki seçim düğmeleri (data-seg grubu)
+  $('#modal-body').addEventListener('click', e => {
+    const b = e.target.closest('[data-segv]'); if (!b) return;
+    const seg = b.closest('[data-seg]');
+    seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    seg.dataset.value = b.dataset.segv;
+    seg.dispatchEvent(new Event('segchange', { bubbles: true }));
+  });
+  const segHtml = (name, opts, val) => `<div class="seg" data-seg="${name}" data-value="${val}">${opts.map(([v, l]) => `<button type="button" data-segv="${v}" class="${v === val ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const segVal = name => { const s = $(`#modal-body [data-seg="${name}"]`); return s ? s.dataset.value : null; };
+  const accOpts = (withNone) => [...ACCS.map(a => [a.id, a.name]), ...(withNone ? [['', 'Hiçbiri']] : [])];
+  const numIn = sel => { const el = $(sel); return el ? parseFloat(String(el.value).replace(/\s/g, '').replace(',', '.')) : NaN; };
+  const peopleDatalist = () => { $('#people-list').innerHTML = db.people.map(p => `<option value="${esc(p)}">`).join(''); };
+
+  // hesaba dokun → gerçek bakiyeyi gir + son hareketler
+  $('#w-accounts').addEventListener('click', e => {
+    const r = e.target.closest('[data-acc]'); if (!r) return;
+    const id = r.dataset.acc, a = methodById(id), b = balances()[id];
+    const mv = b && b.recent.length ? `<div class="mv-list"><div class="muted">Son girişten sonraki hareketler:</div>${b.recent.map(x =>
+      `<div class="mv"><span>${dayShort.format(x.ts)} · ${esc(x.label)}</span><b class="${x.cny > 0 ? 'plus' : ''}">${x.cny > 0 ? '+' : ''}${fmt(x.cny)}</b></div>`).join('')}</div>` : '';
+    openModal({
+      title: a.name,
+      body: `<div>${b ? `Uygulamadaki bakiye: <b>${fmt(b.bal)}</b>` : `${a.name} uygulamasına bak ve şu anki bakiyeni yaz.`}</div>
+        <label class="f">Gerçek bakiye (¥)<input id="m-bal" type="text" inputmode="decimal" placeholder="örn. 1250,80" value="${b ? String(b.bal).replace('.', ',') : ''}"></label>
+        <div class="muted small">Bundan sonra ${a.name} ile yaptığın harcamalar bu bakiyeden düşer, gelen paralar eklenir. Arada bir gerçek bakiyeyi girerek düzeltebilirsin.</div>${mv}`,
+      buttons: [{ label: 'Vazgeç' }, { label: 'Kaydet', primary: true, onClick: () => {
+        const v = numIn('#m-bal'); if (isNaN(v)) { toast('Bir tutar yaz'); return false; }
+        db.moves.push({ id: newId(), type: 'set', acc: id, cny: c2(v), ts: Date.now() });
+        save(); render(); toast(`${a.name} bakiyesi: ${fmt(v)}`);
+      } }],
+    });
+    setTimeout(() => { const i = $('#m-bal'); if (i) i.select(); }, 50);
+  });
+
+  $('#btn-income').addEventListener('click', () => openModal({
+    title: 'Para ekle',
+    body: `<div class="muted small">Maaş, yükleme, iade gibi dışarıdan gelen para.</div>
+      <label class="f">Hangi hesaba?${segHtml('acc', accOpts(false), 'card')}</label>
+      <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>
+      <label class="f">Açıklama<input id="m-note" type="text" placeholder="örn. Maaş"></label>`,
+    buttons: [{ label: 'Vazgeç' }, { label: 'Ekle', primary: true, onClick: () => {
+      const v = numIn('#m-amt'); if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
+      db.moves.push({ id: newId(), type: 'in', acc: segVal('acc'), cny: c2(v), ts: Date.now(), note: $('#m-note').value.trim() });
+      save(); render(); toast(`${fmt(v)} eklendi → ${methodById(segVal('acc')).name}`);
+    } }],
+  }));
+
+  $('#btn-xfer').addEventListener('click', () => openModal({
+    title: 'Hesaplar arası',
+    body: `<div class="muted small">Örn. karttan Alipay'e yükleme, WeChat'ten karta çekme.</div>
+      <label class="f">Nereden?${segHtml('from', accOpts(false), 'card')}</label>
+      <label class="f">Nereye?${segHtml('to', accOpts(false), 'alipay')}</label>
+      <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>`,
+    buttons: [{ label: 'Vazgeç' }, { label: 'Aktar', primary: true, onClick: () => {
+      const v = numIn('#m-amt'), from = segVal('from'), to = segVal('to');
+      if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
+      if (from === to) { toast('İki farklı hesap seç'); return false; }
+      db.moves.push({ id: newId(), type: 'xfer', acc: from, to, cny: c2(v), ts: Date.now() });
+      save(); render(); toast(`${fmt(v)}: ${methodById(from).name} → ${methodById(to).name}`);
+    } }],
+  }));
+
+  // borç / alacak ekle
+  $('#btn-add-debt').addEventListener('click', () => openDebtForm('out'));
+  function openDebtForm(dir) {
+    peopleDatalist();
+    const catOpts = db.cats.map(c => `<option value="${c.id}">${c.emoji} ${esc(c.name)}</option>`).join('');
+    openModal({
+      title: 'Borç / alacak ekle',
+      body: `${segHtml('dir', [['out', 'Ben borçluyum'], ['in', 'O bana borçlu']], dir)}
+        <label class="f">Kim?<input id="m-who" type="text" list="people-list" placeholder="İsim" autocomplete="off"></label>
+        <label class="f">Tutar (¥)<input id="m-amt" type="text" inputmode="decimal"></label>
+        <label class="f">Ne için?<input id="m-note" type="text" placeholder="örn. Akşam yemeği, taksi"></label>
+        <label class="f" id="m-acc-wrap"><span id="m-acc-label"></span>${segHtml('acc', accOpts(true), '')}</label>
+        <label class="f" id="m-cat-wrap">Harcama olarak da kaydet (kategori)<select id="m-cat"><option value="">— Kaydetme —</option>${catOpts}</select></label>`,
+      buttons: [{ label: 'Vazgeç' }, { label: 'Kaydet', primary: true, onClick: () => {
+        const d = segVal('dir'), who = $('#m-who').value.trim(), v = numIn('#m-amt'), acc = segVal('acc') || null;
+        if (!who) { toast('Kişinin adını yaz'); return false; }
+        if (!(v > 0)) { toast('Bir tutar yaz'); return false; }
+        const note = $('#m-note').value.trim();
+        const debt = { id: newId(), dir: d, who, cny: c2(v), note, ts: Date.now(), acc, paid: [] };
+        const cat = $('#m-cat').value;
+        if (d === 'out' && !acc && cat) {
+          // biri benim yerime ödedi → bu benim harcamam; para henüz hesabımdan çıkmadı
+          const tx = { id: newId(), ts: Date.now(), amt: c2(v), cur: 'CNY', cny: c2(v), method: 'owed', cat, note: note || `${who} ödedi`, orig: '', src: 'manual', created: Date.now() };
+          db.tx.push(tx); debt.txId = tx.id;
+        }
+        db.debts.push(debt); rememberPerson(who);
+        save(); render();
+        toast(d === 'out' ? `${who}'a ${fmt(v)} borçlusun` : `${who} sana ${fmt(v)} borçlu`);
+      } }],
+    });
+    const sync = () => {
+      const d = segVal('dir'), acc = segVal('acc');
+      $('#m-acc-label').textContent = d === 'out' ? 'Para hesabıma girdi mi? (borç aldıysan)' : 'Para hangi hesabımdan çıktı? (borç verdiysen)';
+      $('#m-cat-wrap').classList.toggle('hidden', !(d === 'out' && !acc));
+    };
+    modalOnSeg = sync;
+    sync();
+    // varsayılan: "ben borçluyum" + hiçbiri → arkadaş benim yerime ödedi, harcama olarak "Yemek"
+    $('#m-cat').value = dir === 'out' ? 'food' : '';
+  }
+
+  // kişiye dokun → kalemler ve "Ödendi"
+  $('#w-owed').addEventListener('click', e => openPerson(e, 'owed'));
+  $('#w-iowe').addEventListener('click', e => openPerson(e, 'iowe'));
+  function openPerson(e, dir, again) {
+    let p;
+    if (again) p = again;
+    else { const r = e.target.closest('.person-row'); if (!r) return; p = WALLET_CACHE[dir][+r.dataset.i]; }
+    if (!p) return;
+    const who = p.who;
+    const fresh = () => (debtsByPerson()[dir].find(x => x.who === who));
+    const draw = () => {
+      const q = fresh();
+      if (!q) { closeModal(); toast(dir === 'owed' ? `${who || 'İsimsiz'}: hepsi ödendi ✓` : `${who} borcu kapandı ✓`); return; }
+      $('#modal-title').textContent = `${who || 'İsimsiz'} · ${fmtDisp(q.total)}`;
+      $('#modal-body').innerHTML = `<div class="muted small">${dir === 'owed' ? 'Sana olan borcu. Para geldiyse “Ödedi”ye dokun.' : 'Senin ona borcun. Ödediysen “Ödedim”e dokun.'}</div>
+        <label class="f">${dir === 'owed' ? 'Para hangi hesabına geldi?' : 'Hangi hesabından ödedin?'}${segHtml('acc', accOpts(true), db.settings.recvAcc || 'wechat')}</label>
+        ${q.items.map((it, i) => `<div class="item-row"><span class="ir-main"><div class="ir-title">${esc(it.title)}</div>
+          <div class="ir-sub">${dayShort.format(it.ts)}${it.kind === 'split' ? ` · bölüşme (${splitInfo(it.t).n} kişi)` : ''}</div></span>
+          <b>${it.kind === 'split' ? fmt(it.amt, it.t.cur) : fmt(it.amt)}</b>
+          <button class="btn small" data-settle="${i}">${dir === 'owed' ? 'Ödedi' : 'Ödedim'}</button></div>`).join('')}`;
+      $('#modal-body').querySelectorAll('[data-settle]').forEach(b => b.onclick = () => {
+        const it = q.items[+b.dataset.settle], acc = segVal('acc') || null;
+        if (acc) db.settings.recvAcc = acc;
+        if (it.kind === 'split') {
+          const g = { a: it.amt, ts: Date.now(), who: it.slot }; if (acc) g.acc = acc; if (who) g.from = who;
+          it.t.split.got = it.t.split.got || []; it.t.split.got.push(g);
+        } else {
+          it.d.paid = it.d.paid || []; it.d.paid.push({ cny: it.amt, ts: Date.now(), acc });
+        }
+        save(); draw();
+      });
+    };
+    openModal({ title: '', body: '', buttons: [{ label: 'Kapat' }] });
+    draw();
   }
 
   /* ---------------- KAYITLAR ---------------- */
@@ -193,7 +467,9 @@
     const pendTotal = allPending.reduce((s, t) => s + pendingCny(t), 0);
     $('#method-strip').innerHTML = METHODS.filter(m => byM[m.id]).map(m =>
       `<span class="mpill">${mdot(m.id)}${m.name} ${fmtDisp(byM[m.id])}</span>`).join('')
-      + (allPending.length && !pendingView ? `<button class="mpill pend" id="pend-pill">👥 Bekleyen ${fmtDisp(pendTotal)} (${allPending.length})</button>` : '');
+      + (allPending.length && !pendingView ? `<button class="mpill pend" id="pend-pill">👥 Bekleyen ${fmtDisp(pendTotal)} (${allPending.length})</button>` : '')
+      + (() => { const b = balances(), k = ACC_IDS.filter(id => b[id]); return k.length && !pendingView
+        ? `<button class="mpill pend" id="bal-pill">💰 Kalan ${fmtDisp(k.reduce((s, id) => s + b[id].bal, 0))}</button>` : ''; })();
 
     // gün gruplarına ayır
     const groups = new Map();
@@ -230,6 +506,7 @@
     $('#backup-banner').classList.toggle('hidden', !(db.tx.length >= 10 && Date.now() - lb > 30 * 864e5));
   }
   $('#method-strip').addEventListener('click', e => {
+    if (e.target.closest('#bal-pill')) return setView('wallet');
     if (!e.target.closest('#pend-pill')) return;
     filter = { type: 'pending' }; search = ''; $('#search-input').value = '';
     renderList();
@@ -296,7 +573,7 @@
     // para birimi
     $('#cur-seg').innerHTML = CUR_ORDER.map(c => `<button class="${c === S.cur ? 'on' : ''}" data-cur="${c}">${CURS[c]}</button>`).join('');
     // ödeme yöntemi
-    $('#method-chips').innerHTML = METHODS.map(m =>
+    $('#method-chips').innerHTML = METHODS.filter(m => m.id !== 'owed' || S.method === 'owed').map(m =>
       `<button class="chip ${m.id === S.method ? 'on' : ''}" data-method="${m.id}">${mdot(m.id)}${m.name}</button>`).join('');
     // sık kullanılanlar
     $('#freq-chips').innerHTML = S.mode === 'add' ? frequents().map((f, i) => {
@@ -335,17 +612,25 @@
     const minePh = String(Math.round(s.mine * 100) / 100).replace('.', ',');
     const active = document.activeElement && document.activeElement.id === 'split-mine';
     const mineVal = active ? document.activeElement.value : (S.split.mine != null ? minePh : '');
-    const nextOne = s.pending > 0.005 ? Math.min(s.share, s.pending) : s.share;
+    const slots = splitSlots({ amt: amountVal(), cny: 0, split: S.split });
+    const names = S.split.people || [];
+    const recv = db.settings.recvAcc || 'wechat';
     p.innerHTML = `
       <div class="sp-row"><span>Kaç kişi? <small>(sen dahil)</small></span>
         <div class="stepper"><button data-sa="minus" aria-label="Azalt">−</button><b>${s.n}</b><button data-sa="plus" aria-label="Artır">＋</button></div></div>
       <div class="sp-row"><span>Senin payın <small>${S.split.mine != null ? '(elle)' : '(eşit)'}</small></span>
         <input id="split-mine" type="text" inputmode="decimal" placeholder="${esc(minePh)}" value="${esc(mineVal)}" aria-label="Senin payın"></div>
-      <div class="sp-sum">Arkadaşlardan gelecek: <b>${f(s.expected)}</b>${s.n > 2 ? ` · kişi başı ${f(s.share)}` : ''}</div>
-      <div class="sp-got">${(S.split.got || []).map((g, i) => `<span class="gchip">✓ ${f(g.a)}${g.from ? ' · ' + esc(g.from) : ''} · ${dayShort.format(g.ts)}<button data-sa="del" data-i="${i}" aria-label="Sil">✕</button></span>`).join('')}</div>
+      <div class="sp-sum">Arkadaşlardan gelecek: <b>${f(s.expected)}</b></div>
+      <div class="sp-people">${slots.map(sl => `<div class="sp-person">
+        <input class="sp-name" data-i="${sl.i}" list="people-list" placeholder="${sl.i + 2}. kişi (isim, isteğe bağlı)" value="${esc(names[sl.i] || '')}" autocomplete="off">
+        <span class="sp-pamt">${f(sl.owed)}</span>
+        ${S.split.closed ? '' : sl.pending > 0.005 ? `<button class="btn small" data-sa="paid" data-i="${sl.i}">Ödedi</button>` : '<span class="sp-ok">✓ Ödedi</span>'}</div>`).join('')}</div>
+      ${s.pending > 0.005 && !S.split.closed ? `<div class="sp-row"><small>Paralar hangi hesabına geliyor?</small>
+        <div class="seg small">${ACCS.map(a => `<button type="button" data-sa="recv" data-acc="${a.id}" class="${a.id === recv ? 'on' : ''}">${a.name}</button>`).join('')}</div></div>` : ''}
+      <div class="sp-got">${(S.split.got || []).map((g, i) => `<span class="gchip">✓ ${f(g.a)}${(g.who != null && names[g.who]) || g.from ? ' · ' + esc((g.who != null && names[g.who]) || g.from) : ''} · ${dayShort.format(g.ts)}<button data-sa="del" data-i="${i}" aria-label="Sil">✕</button></span>`).join('')}</div>
       ${S.split.closed ? '<div class="sp-status">Kapatıldı: gelmeyen kısım senin harcaman sayılır.</div>'
         : s.pending > 0.005 ? `<div class="sp-status">Bekleyen: ${f(s.pending)}</div>
-          <div class="sp-btns"><button class="btn small" data-sa="one">＋ Biri gönderdi (${f(nextOne)})</button><button class="btn small" data-sa="custom">＋ Farklı tutar</button></div>`
+          <div class="sp-btns"><button class="btn small" data-sa="custom">＋ Farklı tutar geldi</button></div>`
         : (s.expected > 0 ? '<div class="sp-status done">✓ Herkes payını gönderdi</div>' : '')}
       <div class="sp-links">
         <button class="link-btn" data-sa="close">${S.split.closed ? 'Yeniden aç' : (s.pending > 0.005 ? 'Gerisi gelmeyecek' : '')}</button>
@@ -353,18 +638,31 @@
   }
   $('#split-toggle').addEventListener('click', () => {
     if (!S) return;
-    if (!S.split) S.split = { n: 2, mine: null, got: [], closed: false };
+    peopleDatalist();
+    if (!S.split) S.split = { n: 2, mine: null, got: [], closed: false, people: [] };
     renderSplit();
     $('#split-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   });
   $('#split-panel').addEventListener('click', e => {
     const b = e.target.closest('[data-sa]'); if (!b || !S || !S.split) return;
     const sp = S.split, s = splitInfo({ amt: amountVal(), split: sp });
-    const addGot = a => { if (a > 0) sp.got.push({ a: Math.round(a * 100) / 100, ts: Date.now() }); };
+    sp.got = sp.got || [];
+    const recv = db.settings.recvAcc || 'wechat';
+    const addGot = (a, who) => {
+      if (!(a > 0)) return;
+      const g = { a: Math.round(a * 100) / 100, ts: Date.now(), acc: recv };
+      if (who != null) { g.who = who; if ((sp.people || [])[who]) g.from = sp.people[who]; }
+      sp.got.push(g);
+    };
     switch (b.dataset.sa) {
       case 'plus': sp.n = Math.min(50, (sp.n || 1) + 1); sp.mine = null; break;
-      case 'minus': sp.n = Math.max(2, (sp.n || 2) - 1); sp.mine = null; break;
-      case 'one': addGot(s.pending > 0.005 ? Math.min(s.share, s.pending) : s.share); break;
+      case 'minus': sp.n = Math.max(2, (sp.n || 2) - 1); sp.mine = null; sp.people = (sp.people || []).slice(0, sp.n - 1); break;
+      case 'paid': {
+        const sl = splitSlots({ amt: amountVal(), cny: 0, split: sp })[+b.dataset.i];
+        if (sl) addGot(sl.pending, sl.i);
+        break;
+      }
+      case 'recv': db.settings.recvAcc = b.dataset.acc; save(); break;
       case 'custom': {
         const v = parseFloat(String(prompt('Gelen tutar:', String(Math.round(s.share * 100) / 100).replace('.', ',')) || '').replace(',', '.'));
         addGot(v);
@@ -375,6 +673,11 @@
       case 'remove': S.split = null; break;
     }
     renderSplit();
+  });
+  $('#split-panel').addEventListener('input', e => {
+    if (!e.target.classList.contains('sp-name') || !S || !S.split) return;
+    S.split.people = S.split.people || [];
+    S.split.people[+e.target.dataset.i] = e.target.value.trim();
   });
   $('#split-panel').addEventListener('change', e => {
     if (e.target.id !== 'split-mine' || !S || !S.split) return;
@@ -461,6 +764,7 @@
     const prev = existing ? { ...existing } : null;
     if (existing) Object.assign(existing, tx); else db.tx.push(tx);
     if (tx.orig) db.merchants[tx.orig] = { d: tx.note, c: tx.cat, n: ((db.merchants[tx.orig] || {}).n || 0) + 1 };
+    if (tx.split) (tx.split.people || []).forEach(rememberPerson);
     db.settings.lastMethod = tx.method;
     db.settings.lastCur = tx.cur;
     save();
@@ -533,6 +837,7 @@
   /* Gelen para (arkadaşın payını gönderdi) → hangi bölüşülmüş harcamaya ait? */
   function openReceiptPicker(item) {
     const r = item.r, amt = r.amount;
+    const hasDebts = db.debts.some(d => d.dir === 'in' && debtRemaining(d) > 0.005);
     const open = db.tx.filter(isPending).map(t => {
       const s = splitInfo(t);
       const inCur = amt * rate(t.cur); // gelen ¥ → harcamanın para birimi
@@ -540,13 +845,17 @@
       return { t, s, score };
     }).sort((a, b) => a.score - b.score).slice(0, 8);
     $('#picker-title').textContent = `Gelen ödeme: ${fmt(amt)}`;
-    $('#picker-sub').textContent = (r.from ? `Gönderen: ${r.from} · ` : '') + (open.length ? 'Hangi bölüşülmüş harcamaya ait?' : 'Bekleyen bölüşülmüş harcama yok.');
+    $('#picker-sub').textContent = (r.from ? `Gönderen: ${r.from} · ` : '') + (open.length || hasDebts ? 'Kimden / hangi harcama için?' : 'Bekleyen alacağın yok.');
     $('#picker-list').innerHTML = open.map(({ t, s }) => {
       const title = mname(t.orig) || t.note || catById(t.cat).name;
       return `<button class="pick" data-id="${t.id}"><span class="pk-main"><div class="pk-title">${catById(t.cat).emoji} ${esc(title)}</div>
         <div class="pk-sub">${dayShort.format(t.ts)} · ${s.n} kişi · toplam ${fmt(t.amt, t.cur)}</div></span>
         <span class="pk-amt">bekleyen<br><b>${fmt(s.pending, t.cur)}</b></span></button>`;
-    }).join('') + '<button class="pick alt" data-id="__expense">Bu bir harcama, normal kaydet</button>';
+    }).join('') + db.debts.filter(d => d.dir === 'in' && debtRemaining(d) > 0.005).map(d =>
+      `<button class="pick" data-debt="${d.id}"><span class="pk-main"><div class="pk-title">👤 ${esc(d.who)} · ${esc(d.note || 'Borç verdim')}</div>
+        <div class="pk-sub">${dayShort.format(d.ts)} · alacak</div></span>
+        <span class="pk-amt">kalan<br><b>${fmt(debtRemaining(d))}</b></span></button>`).join('')
+      + '<button class="pick alt" data-id="__expense">Bu bir harcama, normal kaydet</button>';
     const ov = $('#picker');
     ov.classList.remove('hidden');
     const done = () => { ov.classList.add('hidden'); $('#picker-list').onclick = null; $('#picker-cancel').onclick = null; };
@@ -555,9 +864,26 @@
       const b = e.target.closest('.pick'); if (!b) return;
       done();
       if (b.dataset.id === '__expense') return nextScan({ ...item, r: { ...r, incoming: false } });
+      if (b.dataset.debt) {
+        const d = db.debts.find(x => x.id === b.dataset.debt); if (!d) return nextScan();
+        const p = { cny: Math.min(c2(amt), debtRemaining(d)), ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
+        d.paid = d.paid || []; d.paid.push(p); save(); render();
+        toast(`${fmt(p.cny)} ← ${d.who}` + (debtRemaining(d) > 0.005 ? ` · kalan ${fmt(debtRemaining(d))}` : ' · ✓ kapandı'), 'Geri al', () => {
+          const i = d.paid.indexOf(p); if (i >= 0) d.paid.splice(i, 1); save(); render();
+        }, 5000);
+        return setTimeout(nextScan, 300);
+      }
       const t = db.tx.find(x => x.id === b.dataset.id); if (!t) return nextScan();
-      const g = { a: Math.round(amt * rate(t.cur) * 100) / 100, ts: r.ts || Date.now() };
+      const g = { a: Math.round(amt * rate(t.cur) * 100) / 100, ts: r.ts || Date.now(), acc: r.method || db.settings.recvAcc || 'wechat' };
       if (r.from) g.from = r.from;
+      // hangi kişi? önce isimden eşleştir, yoksa ödemeyen ilk kişi
+      const slots = splitSlots(t), names = t.split.people || [];
+      let sl = r.from ? slots.find(x => x.name && (x.name.includes(r.from) || r.from.includes(x.name)) && x.pending > 0.005) : null;
+      if (!sl) sl = slots.find(x => !x.name && x.pending > 0.005) || slots.find(x => x.pending > 0.005);
+      if (sl) {
+        g.who = sl.i;
+        if (!names[sl.i] && r.from) { t.split.people = names; names[sl.i] = r.from; rememberPerson(r.from); }
+      }
       t.split.got = t.split.got || [];
       t.split.got.push(g);
       save(); render();

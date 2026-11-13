@@ -301,6 +301,51 @@ button.tile { width: 100%; font: inherit; color: inherit; }
 .pick .pk-amt { text-align: right; font-size: 13px; color: var(--ink-2); flex: none; font-variant-numeric: tabular-nums; }
 .pick.alt { background: transparent; border: 1px dashed var(--line); justify-content: center; color: var(--accent); }
 
+/* ---------- cüzdan ---------- */
+.m-owed { background: #8a8a8a; }
+.gear { font-size: 22px; }
+.h2-total { float: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+.acc-row, .person-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 10px 0; }
+.acc-row + .acc-row, .person-row + .person-row { border-top: 1px solid var(--line); }
+.acc-row .mdot { width: 30px; height: 30px; border-radius: 10px; font-size: 14px; }
+.acc-main, .pr-main { flex: 1; min-width: 0; }
+.acc-name, .pr-name { font-weight: 600; }
+.acc-sub, .pr-sub { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acc-bal, .pr-amt { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.acc-bal.unknown { color: var(--accent); font-weight: 500; font-size: 14px; }
+.acc-bal.neg { color: var(--bad); }
+.pr-ico { width: 34px; height: 34px; border-radius: 17px; background: var(--surface-2); display: grid; place-items: center; flex: none; }
+.w-actions { display: flex; gap: 8px; margin-top: 8px; }
+.w-actions .btn { flex: 1; }
+.w-empty { color: var(--muted); font-size: 14px; padding: 4px 0; }
+
+.modal-body { display: grid; gap: 10px; overflow-y: auto; font-size: 14.5px; }
+.modal-body label.f { display: grid; gap: 4px; color: var(--ink-2); font-size: 13px; }
+.modal-body input, .modal-body select { height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--page); color: var(--ink); padding: 0 12px; font-size: 16px; width: 100%; }
+.modal-body .seg { display: flex; flex-wrap: wrap; }
+.modal-body .seg button { padding: 6px 10px; font-size: 14px; }
+.modal-btns { display: flex; gap: 8px; margin-top: 6px; }
+.modal-btns .btn { flex: 1; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.mv-list { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.mv { display: flex; justify-content: space-between; gap: 8px; }
+.mv b { font-variant-numeric: tabular-nums; }
+.mv .plus { color: var(--good); }
+.item-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--surface-2); border-radius: 10px; padding: 8px 10px; }
+.item-row .ir-main { min-width: 0; }
+.item-row .ir-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-row .ir-sub { font-size: 12px; color: var(--muted); }
+.item-row .btn { width: auto; height: 34px; font-size: 13px; flex: none; }
+
+/* bölüşmede kişiler */
+.sp-people { display: grid; gap: 6px; }
+.sp-person { display: flex; align-items: center; gap: 8px; }
+.sp-person input { flex: 1; min-width: 0; height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--page); padding: 0 10px; font-size: 16px; }
+.sp-person .sp-pamt { font-variant-numeric: tabular-nums; font-size: 13.5px; color: var(--ink-2); flex: none; }
+.sp-person .btn { width: auto; height: 34px; font-size: 13px; padding: 0 10px; flex: none; }
+.sp-ok { color: var(--good); font-weight: 600; font-size: 13.5px; flex: none; min-width: 64px; text-align: center; }
+.seg.small button { padding: 4px 9px; font-size: 13px; }
+
 /* ---------- overlay & toast ---------- */
 .overlay { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 24px; }
 .overlay-box { background: var(--surface); border-radius: 18px; padding: 24px; width: min(320px, 100%); text-align: center; display: grid; gap: 10px; justify-items: center; }
