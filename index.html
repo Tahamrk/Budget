@@ -92,8 +92,9 @@
       <h1 class="page-title">Cüzdan</h1>
       <button class="icon-btn gear" id="btn-settings" aria-label="Ayarlar">⚙︎</button>
     </header>
-    <div class="card hero">
+    <div class="card hero w-hero">
       <div class="hero-label">Toplam param</div>
+      <button class="eye-btn" id="btn-eye" aria-label="Bakiyeyi göster"></button>
       <div class="hero-value" id="w-total">—</div>
       <div class="hero-sub" id="w-sub"></div>
     </div>
@@ -130,6 +131,12 @@
       <h2>Mağaza adları</h2>
       <p class="muted small">Çince mağaza adları İngilizceye çevrilerek gösterilir. Kayıtlar ekranındaki EN/中 düğmesiyle de değiştirebilirsin.</p>
       <div class="seg" id="set-name-lang"></div>
+    </div>
+
+    <div class="card">
+      <h2>Bakiye gizleme</h2>
+      <p class="muted small" id="pin-info"></p>
+      <div class="btn-col" id="pin-btns"></div>
     </div>
 
     <div class="card">
@@ -266,6 +273,20 @@
   </div>
 </div>
 <datalist id="people-list"></datalist>
+
+<!-- ============ PIN ============ -->
+<div class="pin-screen hidden" id="pin" role="dialog" aria-modal="true" aria-labelledby="pin-title">
+  <div class="pin-box" id="pin-box">
+    <div class="pin-lock" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/></svg>
+    </div>
+    <div class="pin-title" id="pin-title">PIN</div>
+    <div class="pin-sub" id="pin-sub"></div>
+    <div class="pin-dots" id="pin-dots" aria-live="polite"><i></i><i></i><i></i><i></i></div>
+    <div class="pin-pad" id="pin-pad"></div>
+    <button class="link-btn pin-cancel" id="pin-cancel">Vazgeç</button>
+  </div>
+</div>
 
 <div class="toast hidden" id="toast"><span id="toast-text"></span><button class="link-btn" id="toast-action"></button></div>
 <div class="tooltip hidden" id="tooltip"></div>

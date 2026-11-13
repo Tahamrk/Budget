@@ -1,7 +1,7 @@
 /* Taha Muhasebe — tüm veriler telefonda (localStorage) */
 (() => {
   'use strict';
-  const VERSION = '1.6.1';
+  const VERSION = '1.7.0';
   const KEY = 'tm.data.v1';
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
@@ -267,16 +267,24 @@
     const byCur = {};
     known.forEach(id => { byCur[bals[id].cur] = (byCur[bals[id].cur] || 0) + bals[id].bal; });
     const curLine = CUR_ORDER.filter(c => byCur[c] != null).map(c => fmt(byCur[c], c)).join(' + ');
-    $('#w-total').textContent = known.length ? fmtDisp(total) : '—';
-    $('#w-sub').textContent = known.length
-      ? `${Object.keys(byCur).length > 1 ? curLine + ' · ' : others(total) + ' · '}${known.length < ACC_IDS.length ? `${ACC_IDS.length - known.length} hesabın bakiyesi girilmedi` : 'tüm hesaplar'}`
-      : 'Hesaplara dokunup şu anki bakiyeni gir';
+    const hide = masked();
+    const eye = $('#btn-eye');
+    eye.innerHTML = hide ? EYE_OFF : EYE;
+    eye.classList.toggle('on', !!db.settings.pin && !hide);
+    eye.setAttribute('aria-label', hide ? 'Bakiyeyi göster' : 'Bakiyeyi gizle');
+    const tot = $('#w-total');
+    tot.classList.toggle('masked', hide && known.length > 0);
+    if (hide && known.length) tot.innerHTML = `<span class="cs">${CURS[dispCur()]}</span>${DOTS(6)}`;
+    else tot.textContent = known.length ? fmtDisp(total) : '—';
+    $('#w-sub').textContent = !known.length ? 'Hesaplara dokunup şu anki bakiyeni gir'
+      : hide ? 'Gizli · görmek için göz simgesine dokun'
+      : `${Object.keys(byCur).length > 1 ? curLine + ' · ' : others(total) + ' · '}${known.length < ACC_IDS.length ? `${ACC_IDS.length - known.length} hesabın bakiyesi girilmedi` : 'tüm hesaplar'}`;
     $('#w-accounts').innerHTML = ACCS.map(a => {
       const b = bals[a.id];
-      const sub = b ? `Bakiye ${dayShort.format(b.at)} girildi${b.recent.length ? ` · sonra ${b.recent.length} hareket` : ''}${a.cur !== dispCur() ? ` · ≈ ${fmtDisp(b.cny)}` : ''}` : `Bakiye girilmedi · ${CURS[a.cur]} ${a.cur}`;
+      const sub = b ? `Bakiye ${dayShort.format(b.at)} girildi${b.recent.length ? ` · sonra ${b.recent.length} hareket` : ''}${a.cur !== dispCur() && !hide ? ` · ≈ ${fmtDisp(b.cny)}` : ''}` : `Bakiye girilmedi · ${CURS[a.cur]} ${a.cur}`;
       return `<button class="acc-row" data-acc="${a.id}">${mdot(a.id)}
         <span class="acc-main"><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(sub)}</div></span>
-        <span class="acc-bal ${!b ? 'unknown' : b.bal < 0 ? 'neg' : ''}">${b ? fmt(b.bal, a.cur) : 'Bakiye gir ›'}</span></button>`;
+        <span class="acc-bal ${!b ? 'unknown' : hide ? 'masked' : b.bal < 0 ? 'neg' : ''}">${!b ? 'Bakiye gir ›' : hide ? maskAmt(a.cur) : fmt(b.bal, a.cur)}</span></button>`;
     }).join('') + '<button class="link-btn" id="btn-add-acc">＋ Hesap ekle (ör. Nakit ₺, Türk kartı)</button>';
 
     const { owed, iowe } = debtsByPerson();
@@ -298,6 +306,127 @@
     const curs = [...new Set(p.items.map(x => x.cur || 'CNY'))];
     return curs.length === 1 ? fmt(p.items.reduce((s, x) => s + x.amt, 0), curs[0]) : fmtDisp(p.total);
   }
+
+  /* ---------------- bakiye gizleme (PIN) ----------------
+   * Bakiyeler ekranda gizlenir, 4 haneli PIN ile açılır. PIN'in kendisi değil, tuzlanmış özeti saklanır.
+   * db.settings.pin = { s: tuz, h: özet } varsa gizleme açıktır. */
+  let unlocked = false, hiddenAt = 0, pinFails = 0, pinWaitUntil = 0, pinState = null;
+  const RELOCK_MS = 60e3; // uygulamadan bu kadar uzun çıkınca yeniden gizle
+  const masked = () => !!db.settings.pin && !unlocked;
+  const DOTS = n => `<span class="mask-dots" role="img" aria-label="gizli">${'<i></i>'.repeat(n)}</span>`;
+  const maskAmt = cur => `${CURS[cur] || ''}${DOTS(4)}`;
+  const svg = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+  const EYE = svg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/>');
+  const EYE_OFF = svg('<path d="M10.6 5.6c.5-.1.9-.1 1.4-.1 6 0 9.5 6.5 9.5 6.5a17.6 17.6 0 0 1-2.9 3.7"/><path d="M6.6 6.6C3.9 8.4 2.5 12 2.5 12S6 18.5 12 18.5c1.7 0 3.2-.5 4.5-1.2"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3.5 3.5l17 17"/>');
+  const pinSleep = ms => new Promise(r => setTimeout(r, ms));
+
+  async function pinHash(pin, salt) {
+    const data = new TextEncoder().encode('tm-pin:' + salt + ':' + pin);
+    if (window.crypto && crypto.subtle) {
+      return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data)), b => b.toString(16).padStart(2, '0')).join('');
+    }
+    let h = 2166136261; for (const b of data) { h ^= b; h = Math.imul(h, 16777619) >>> 0; }
+    return 'f' + h.toString(16);
+  }
+  const checkPin = async p => !!db.settings.pin && (await pinHash(p, db.settings.pin.s)) === db.settings.pin.h;
+  async function storePin(p) {
+    const s = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+    db.settings.pin = { s, h: await pinHash(p, s) };
+    save();
+  }
+
+  // tuş takımı
+  const PIN_LETTERS = ['&nbsp;', 'ABC', 'DEF', 'GHI', 'JKL', 'MNO', 'PQRS', 'TUV', 'WXYZ'];
+  $('#pin-pad').innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button class="pin-key" data-k="${n}">${n}<small>${PIN_LETTERS[n - 1]}</small></button>`).join('')
+    + '<span class="pin-key blank"></span><button class="pin-key" data-k="0">0<small>&nbsp;</small></button>'
+    + `<button class="pin-key fn" data-k="del" aria-label="Sil">${svg('<path d="M9 5h10.5A1.5 1.5 0 0 1 21 6.5v11a1.5 1.5 0 0 1-1.5 1.5H9l-6-7Z"/><path d="m12.5 9.5 5 5m0-5-5 5"/>')}</button>`;
+  const setPinSub = (text, err) => { const el = $('#pin-sub'); el.textContent = text || ''; el.classList.toggle('err', !!err); };
+  const drawDots = () => { const n = pinState ? pinState.entry.length : 0; $$('#pin-dots i').forEach((d, i) => d.classList.toggle('on', i < n)); };
+  const waitMsg = () => `Çok fazla yanlış deneme. ${Math.ceil((pinWaitUntil - Date.now()) / 1000)} sn bekle.`;
+
+  // PIN ekranını aç; check(pin) → true (kabul) ya da hata metni. Kabul edilen PIN'le, vazgeçilirse null ile döner.
+  function pinPad({ title, sub, check }) {
+    return new Promise(resolve => {
+      const box = $('#pin-box'), wasOpen = !$('#pin').classList.contains('hidden');
+      if (pinState) pinState.resolve(null);
+      pinState = { entry: '', check, resolve, busy: false };
+      $('#pin-title').textContent = title;
+      setPinSub(sub);
+      $('#pin-dots').classList.remove('ok', 'err');
+      drawDots();
+      $('#pin').classList.remove('hidden');
+      if (wasOpen) { box.classList.remove('swap'); void box.offsetWidth; box.classList.add('swap'); }
+    });
+  }
+  function closePin(val) {
+    const st = pinState; pinState = null;
+    if (st) st.resolve(val);
+    // arka arkaya iki ekran (PIN + tekrar) açılırken kapanıp açılma titremesi olmasın
+    setTimeout(() => { if (!pinState) $('#pin').classList.add('hidden'); }, 0);
+  }
+  async function pinPress(k) {
+    const st = pinState; if (!st || st.busy) return;
+    if (Date.now() < pinWaitUntil) { setPinSub(waitMsg(), true); return; }
+    if (k === 'del') { st.entry = st.entry.slice(0, -1); drawDots(); return; }
+    if (st.entry.length >= 4) return;
+    st.entry += k; drawDots();
+    if (st.entry.length < 4) return;
+    st.busy = true;
+    const res = await st.check(st.entry);
+    if (pinState !== st) return;
+    const dots = $('#pin-dots');
+    if (res === true) { dots.classList.add('ok'); await pinSleep(160); if (pinState === st) closePin(st.entry); return; }
+    dots.classList.remove('err'); void dots.offsetWidth; dots.classList.add('err');
+    setPinSub(typeof res === 'string' ? res : 'Yanlış PIN', true);
+    await pinSleep(450);
+    if (pinState !== st) return;
+    st.entry = ''; st.busy = false; dots.classList.remove('err'); drawDots();
+  }
+  $('#pin-pad').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) pinPress(b.dataset.k); });
+  $('#pin-cancel').addEventListener('click', () => closePin(null));
+  document.addEventListener('keydown', e => {
+    if (!pinState) return;
+    if (/^\d$/.test(e.key)) { e.preventDefault(); pinPress(e.key); }
+    else if (e.key === 'Backspace') { e.preventDefault(); pinPress('del'); }
+    else if (e.key === 'Escape') closePin(null);
+  });
+
+  // mevcut PIN'i sor (yanlış denemeler sınırlı)
+  async function verifyPin(title, sub) {
+    const ok = await pinPad({ title, sub: sub || 'PIN kodunu gir', check: async p => {
+      if (Date.now() < pinWaitUntil) return waitMsg();
+      if (await checkPin(p)) { pinFails = 0; return true; }
+      if (++pinFails >= 5) { pinFails = 0; pinWaitUntil = Date.now() + 30e3; return 'Çok fazla yanlış deneme. 30 sn bekle.'; }
+      return `Yanlış PIN · ${5 - pinFails} deneme hakkın kaldı`;
+    } });
+    return !!ok;
+  }
+  async function setupPin(title) {
+    let first = '';
+    const a = await pinPad({ title: title || 'PIN belirle', sub: 'Bakiyeni görmek için kullanacağın 4 haneli PIN', check: async p => { first = p; return true; } });
+    if (!a) return false;
+    const b = await pinPad({ title: 'PIN\'i tekrar gir', sub: 'Onaylamak için aynı PIN\'i gir', check: async p => p === first || 'PIN\'ler eşleşmedi, tekrar dene' });
+    if (!b) return false;
+    await storePin(first);
+    return true;
+  }
+  async function unlockBalances() {
+    if (!masked()) return true;
+    if (!(await verifyPin('Bakiyeyi göster'))) return false;
+    unlocked = true; render();
+    $$('#w-total, .acc-bal, #bal-pill').forEach(el => { el.classList.remove('reveal'); void el.offsetWidth; el.classList.add('reveal'); });
+    return true;
+  }
+  function lockBalances() { unlocked = false; render(); }
+  $('#btn-eye').addEventListener('click', async () => {
+    if (masked()) return unlockBalances();
+    if (db.settings.pin) return lockBalances();
+    if (await setupPin()) { unlocked = false; render(); toast('Bakiye gizlendi · göz simgesiyle PIN girerek açarsın', null, null, 5000); }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) hiddenAt = Date.now();
+    else if (unlocked && db.settings.pin && Date.now() - hiddenAt > RELOCK_MS) lockBalances();
+  });
 
   /* genel pencere */
   let modalOnSeg = null; // açık penceredeki seçim değişince çağrılır
@@ -339,7 +468,12 @@
   $('#w-accounts').addEventListener('click', e => {
     if (e.target.closest('#btn-add-acc')) return openAccountForm(null);
     const r = e.target.closest('[data-acc]'); if (!r) return;
-    const id = r.dataset.acc, a = ACCS.find(x => x.id === id), b = balances()[id];
+    const id = r.dataset.acc;
+    if (masked() && balances()[id]) { unlockBalances().then(ok => { if (ok) openAccount(id); }); return; }
+    openAccount(id);
+  });
+  function openAccount(id) {
+    const a = ACCS.find(x => x.id === id), b = balances()[id];
     const mv = b && b.recent.length ? `<div class="mv-list"><div class="muted">Son girişten sonraki hareketler:</div>${b.recent.map(x =>
       `<div class="mv"><span>${dayShort.format(x.ts)} · ${esc(x.label)}</span><b class="${x.amt > 0 ? 'plus' : ''}">${x.amt > 0 ? '+' : ''}${fmt(x.amt, a.cur)}</b></div>`).join('')}</div>` : '';
     openModal({
@@ -356,7 +490,7 @@
     });
     $('#m-edit-acc').onclick = () => openAccountForm(a);
     setTimeout(() => { const i = $('#m-bal'); if (i) i.select(); }, 50);
-  });
+  }
 
   // hesap ekle / düzenle / sil
   // hesabı kullanan GERÇEK kayıtlar (girilen bakiye kaydı sayılmaz; hesapla birlikte silinir)
@@ -593,7 +727,7 @@
       `<span class="mpill">${mdot(m.id)}${esc(m.name)} ${fmtDisp(byM[m.id])}</span>`).join('')
       + (allPending.length && !pendingView ? `<button class="mpill pend" id="pend-pill">👥 Bekleyen ${fmtDisp(pendTotal)} (${allPending.length})</button>` : '')
       + (() => { const b = balances(), k = ACC_IDS.filter(id => b[id]); return k.length && !pendingView
-        ? `<button class="mpill pend" id="bal-pill">💰 Kalan ${fmtDisp(k.reduce((s, id) => s + b[id].cny, 0))}</button>` : ''; })();
+        ? `<button class="mpill pend" id="bal-pill">💰 Kalan ${masked() ? maskAmt(dispCur()) : fmtDisp(k.reduce((s, id) => s + b[id].cny, 0))}</button>` : ''; })();
 
     // gün gruplarına ayır
     const groups = new Map();
@@ -1192,7 +1326,31 @@
       <span>${catById(v.c).emoji}</span><div class="mr-main"><div>${esc(v.d || catById(v.c).name)}</div><div>${esc(mname(k))} · ${esc(mnameOther(k))}</div></div>
       <button class="x-btn" data-del aria-label="Unut">✕</button></div>`).join('') : '<p class="muted small">Henüz yok.</p>';
     $('#version-info').textContent = 'Taha Muhasebe v' + VERSION;
+    const hasPin = !!db.settings.pin;
+    $('#pin-info').textContent = hasPin
+      ? 'Açık. Cüzdan’daki bakiyeler gizli; göz simgesine dokunup PIN girince görünür. Uygulamadan 1 dakikadan uzun çıkınca yeniden gizlenir.'
+      : 'Kapalı. Açarsan Cüzdan’daki bakiyeler gizlenir, görmek için 4 haneli PIN istenir.';
+    $('#pin-btns').innerHTML = hasPin
+      ? '<button class="btn" data-pin="change">PIN’i değiştir</button><button class="btn" data-pin="off">Gizlemeyi kapat</button><button class="link-btn" data-pin="forgot">PIN’i unuttum</button>'
+      : '<button class="btn" data-pin="on">🔒 Bakiyeyi gizle (PIN belirle)</button>';
   }
+  $('#pin-btns').addEventListener('click', async e => {
+    const b = e.target.closest('[data-pin]'); if (!b) return;
+    const act = b.dataset.pin;
+    if (act === 'on') {
+      if (await setupPin()) { unlocked = false; toast('Bakiye gizlendi'); }
+    } else if (act === 'change') {
+      if (!(await verifyPin('Mevcut PIN'))) return;
+      if (await setupPin('Yeni PIN')) toast('PIN değiştirildi');
+    } else if (act === 'off') {
+      if (!(await verifyPin('Gizlemeyi kapat'))) return;
+      db.settings.pin = null; unlocked = false; save(); toast('Bakiyeler artık açık görünüyor');
+    } else if (act === 'forgot') {
+      if (!confirm('PIN silinecek ve bakiyeler açık görünecek. Kayıtların silinmez. Sonra yeni bir PIN belirleyebilirsin. Devam?')) return;
+      db.settings.pin = null; unlocked = false; save(); toast('PIN sıfırlandı');
+    }
+    render();
+  });
   $('#set-name-lang').addEventListener('click', e => {
     const b = e.target.closest('[data-nl]'); if (!b) return;
     db.settings.nameLang = b.dataset.nl; save(); renderSettings();
@@ -1305,7 +1463,7 @@
       const d = j && j.data ? j.data : j;
       if (!d || !Array.isArray(d.tx)) throw new Error('Geçersiz dosya');
       if (!confirm(`Yedekte ${d.tx.length} kayıt var. Mevcut ${db.tx.length} kaydın yerine geçsin mi?`)) return;
-      db = normalizeDb(d); syncAccounts(); save(); render(); toast('Yedek geri yüklendi');
+      db = normalizeDb(d); syncAccounts(); unlocked = false; save(); render(); toast('Yedek geri yüklendi');
     } catch (err) { toast('Dosya okunamadı: ' + err.message); }
   });
   $('#btn-wipe').addEventListener('click', () => {
@@ -1337,7 +1495,7 @@
     let reloaded = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!hadController || reloaded) return;
-      const busy = !$('#sheet').classList.contains('hidden') || !$('#modal').classList.contains('hidden');
+      const busy = !$('#sheet').classList.contains('hidden') || !$('#modal').classList.contains('hidden') || !$('#pin').classList.contains('hidden');
       if (busy) { toast('Yeni sürüm hazır — uygulamayı kapatıp açınca gelir', null, null, 6000); return; }
       reloaded = true; location.reload();
     });

@@ -1,6 +1,6 @@
 /* Çevrimdışı çalışma: uygulama dosyaları önbellekte tutulur.
  * Uygulamayı güncellediğinde CACHE sürümünü artır. */
-const CACHE = 'tm-v1.6.1';
+const CACHE = 'tm-v1.7.0';
 const SHELL = [
   './', 'index.html', 'app.css', 'app.js', 'ocr.js', 'dictionary.js', 'pinyin.js', 'translate.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
